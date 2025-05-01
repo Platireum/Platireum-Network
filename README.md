@@ -141,39 +141,3 @@ The system relies on the following external libraries and standards:
 
 * **OpenSSL**: Used for all cryptographic operations (including `crypto`, `ec`, `ecdsa`, and `sha`).
 * **C++17 Standard Library**: Utilized for various core functionalities and data structures.
-
-## Usage Example
-
-```cpp
-#include "hybrid_ledger.h"
-#include "crypto_helper.h"
-#include "transaction.h"
-#include <iostream>
-#include <vector>
-
-int main() {
-    // Initialize the hybrid ledger system
-    HybridLedger ledger;
-
-    // Generate a new key pair for a user named "alice"
-    auto aliceKey = CryptoHelper::generateKeyPair();
-
-    // Add "alice" as a validator with a stake of 5000 units
-    ledger.addValidator("alice", std::move(aliceKey), 5000.0);
-
-    // Get the current UTXOs owned by "alice"
-    auto aliceUtxos = ledger.getUTXOs("alice");
-
-    // Create a new transaction to send 100 units to "bob" (assuming createTransaction function exists)
-    if (!aliceUtxos.empty()) {
-        Transaction tx = createTransaction(aliceUtxos, "bob", 100.0);
-        // Submit the transaction to the ledger
-        ledger.submitTransaction(tx);
-    } else {
-        std::cout << "Alice has no UTXOs to spend." << std::endl;
-    }
-
-    // The system will automatically process transactions and create finality blocks in the background.
-
-    return 0;
-}
