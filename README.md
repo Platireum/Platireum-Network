@@ -1,210 +1,179 @@
-# Platireum-Network-
-Overview
-This system combines blockchain security with Directed Acyclic Graph (DAG) scalability to create a high-performance distributed ledger. Key features include:
+## Overview
 
-Proof-of-Stake consensus
+This system architecture integrates the security of blockchain technology with the scalability of a Directed Acyclic Graph (DAG) to establish a high-performance distributed ledger. Key features include a Proof-of-Stake consensus mechanism, a UTXO model akin to Bitcoin, rapid DAG-based transaction processing, periodic blockchain finality, and support for smart contracts.
 
-UTXO model similar to Bitcoin
+## Core Components
 
-Fast DAG-based transaction processing
+### 1. CryptoHelper Class
 
-Periodic blockchain finality
+This class encapsulates all cryptographic operations utilizing the OpenSSL library. Its functionalities encompass:
 
-Smart contract support
+* **Key generation (ECDSA secp256k1)**: Generation of Elliptic Curve Digital Signature Algorithm key pairs using the secp256k1 curve.
+* **Digital signatures**: Creation of digital signatures for transaction authentication.
+* **SHA-256 hashing**: Computation of Secure Hash Algorithm 256-bit digests for data integrity.
+* **Public key management**: Handling and storage of public keys.
 
-Core Components
-1. CryptoHelper Class
-Handles all cryptographic operations using OpenSSL:
+**Key Methods:**
 
-Key generation (ECDSA secp256k1)
+* `generateKeyPair()`: Generates a new public/private key pair.
+* `signData()`: Signs a given message using the private key.
+* `verifySignature()`: Verifies the digital signature of a message.
+* `sha256()`: Computes the SHA-256 hash of input data.
 
-Digital signatures
+### 2. Transaction System
 
-SHA-256 hashing
+This module implements the Unspent Transaction Output (UTXO) model.
 
-Public key management
+* **TransactionOutput**: Represents an unspent coin and contains the following attributes:
+    * `txId`: Identifier of the transaction that created this output.
+    * `outputIndex`: Index of this output within the creating transaction.
+    * `ownerAddress`: The public address of the output owner.
+    * `amount`: The value of the unspent coin.
+* **TransactionInput**: References a UTXO being spent and includes:
+    * `utxoId`: Identifier of the UTXO being consumed.
+    * `signature`: Digital signature proving ownership of the UTXO.
+    * `publicKey`: The public key associated with the private key used for signing.
+* **Transaction**: Combines transaction inputs and outputs. It undergoes validation against the current UTXO set, incorporates references to parent transactions within the DAG, and generates a unique hash identifier.
 
-Key Methods:
+### 3. TransactionDAG Class
 
-generateKeyPair(): Creates new public/private key pair
+This class manages the Directed Acyclic Graph (DAG) structure, responsible for:
 
-signData(): Signs messages with private key
+* Storing all transactions within the DAG.
+* Tracking the parent-child relationships between transactions.
+* Maintaining a set of current "tips" – transactions with no subsequent child transactions.
+* Updating the UTXO set based on processed transactions.
+* Providing thread-safe access to the DAG data.
 
-verifySignature(): Verifies message signatures
+**Key Methods:**
 
-sha256(): Computes SHA-256 hash
+* `addTransaction()`: Validates a new transaction and adds it to the DAG.
+* `getTips()`: Returns the current set of tip transactions.
+* `getAddressUTXOs()`: Retrieves all unspent transaction outputs associated with a specific address.
 
-2. Transaction System
-Implements Unspent Transaction Output (UTXO) model:
+### 4. FinalityChain Class
 
-TransactionOutput:
+This component ensures blockchain-level finality for the transactions within the DAG. It functions by:
 
-Represents unspent coins
+* Creating periodic blocks composed of the current DAG tips.
+* Maintaining the sequential blockchain of these finality blocks.
+* Providing methods for looking up blocks within the chain.
 
-Contains: txId, outputIndex, ownerAddress, amount
+**Block Structure:**
 
-TransactionInput:
+* `blockNumber`: Sequential identifier of the block.
+* `blockHash`: Unique hash of the current block.
+* `previousHash`: Hash of the preceding block in the chain.
+* `transactions`: List of transaction hashes finalized in this block.
+* `validator`: The validator who proposed this block.
+* `timestamp`: Time at which the block was created.
 
-References UTXO being spent
+### 5. ValidatorManager Class
 
-Contains: utxoId, signature, publicKey
+This class manages the network's Proof-of-Stake validators, including:
 
-Transaction:
+* Tracking the stake amount for each validator.
+* Selecting validators for block creation based on their staked weight.
+* Managing the public keys of the validators.
+* Ensuring thread-safe operations for validator data.
 
-Combines inputs and outputs
+### 6. HybridLedger Class
 
-Validates against UTXO set
+This is the central system component that integrates all other modules. It is responsible for:
 
-Includes DAG parent references
+* Coordinating the operation of the DAG and the finality blockchain.
+* Managing the selection of validators for block creation.
+* Handling the background thread responsible for periodic block creation.
+* Providing a public API for interacting with the ledger, including:
+    * Submitting new transactions to the DAG.
+    * Querying the current state of the ledger.
+    * Performing validator-related operations.
 
-Generates unique hash ID
+## Workflow
 
-3. TransactionDAG Class
-Manages the DAG structure:
+### Transaction Creation
 
-Stores all transactions
+1.  A user initiates a transaction, specifying the UTXOs they wish to spend.
+2.  The user signs the transaction inputs using their private key, proving ownership of the UTXOs.
+3.  The user selects one or more recent tip transactions from the DAG to serve as parent transactions for the new transaction.
 
-Tracks parent-child relationships
+### Transaction Processing
 
-Maintains current "tips" (transactions with no children)
+1.  The newly created transaction is added to the TransactionDAG.
+2.  The transaction is validated against the current UTXO set to ensure the inputs are valid and unspent.
+3.  The DAG structure is updated to include the new transaction and its parent-child relationships.
+4.  The set of DAG tips is updated accordingly.
 
-Updates UTXO set
+### Block Creation (Periodic)
 
-Provides thread-safe access
+1.  At a configured interval (e.g., every 30 seconds), a validator is selected based on their stake in the system.
+2.  The selected validator proposes a new block containing the current set of DAG tip transactions.
+3.  The new block is added to the FinalityChain, referencing the previous block's hash.
+4.  Validator-related information (e.g., rewards) may be updated.
 
-Key Methods:
+### Validation
 
-addTransaction(): Validates and adds new transaction
+* All transactions within the DAG are cryptographically verified using the signatures provided in the inputs.
+* The existence and ownership of the UTXOs being spent are checked against the current UTXO set.
+* Mechanisms are in place to prevent double-spending of UTXOs.
 
-getTips(): Returns current tips for new transactions
+## Error Handling
 
-getAddressUTXOs(): Returns UTXOs for specific address
+The system incorporates custom exception classes to handle specific error conditions:
 
-4. FinalityChain Class
-Provides blockchain finality:
+* `CryptoError`: Indicates errors during cryptographic operations.
+* `TransactionError`: Signifies invalid or malformed transactions.
+* `LedgerError`: Represents system-level issues and inconsistencies.
 
-Creates periodic blocks from DAG tips
+All custom exception classes include descriptive error messages and contextual information to aid in debugging and issue resolution.
 
-Maintains block chain
+## Thread Safety
 
-Provides block lookup methods
+Critical sections of the code that involve shared data structures are protected using:
 
-Block Structure:
+* `std::mutex` for ensuring exclusive access to shared resources.
+* `std::lock_guard` for Resource Acquisition Is Initialization (RAII)-style locking, automatically releasing the lock when the guard goes out of scope.
+* Atomic flags for managing the state of control variables in a thread-safe manner.
 
-blockNumber, blockHash, previousHash
+## Dependencies
 
-transactions list, validator, timestamp
+The system relies on the following external libraries and standards:
 
-5. ValidatorManager Class
-Manages proof-of-stake validators:
+* **OpenSSL**: Used for all cryptographic operations (including `crypto`, `ec`, `ecdsa`, and `sha`).
+* **C++17 Standard Library**: Utilized for various core functionalities and data structures.
 
-Tracks validator stakes
+## Usage Example
 
-Selects validators weighted by stake
+```cpp
+#include "hybrid_ledger.h"
+#include "crypto_helper.h"
+#include "transaction.h"
+#include <iostream>
+#include <vector>
 
-Manages validator keys
+int main() {
+    // Initialize the hybrid ledger system
+    HybridLedger ledger;
 
-Thread-safe operations
+    // Generate a new key pair for a user named "alice"
+    auto aliceKey = CryptoHelper::generateKeyPair();
 
-6. HybridLedger Class
-Main system combining all components:
+    // Add "alice" as a validator with a stake of 5000 units
+    ledger.addValidator("alice", std::move(aliceKey), 5000.0);
 
-Coordinates DAG and blockchain
+    // Get the current UTXOs owned by "alice"
+    auto aliceUtxos = ledger.getUTXOs("alice");
 
-Manages validator selection
+    // Create a new transaction to send 100 units to "bob" (assuming createTransaction function exists)
+    if (!aliceUtxos.empty()) {
+        Transaction tx = createTransaction(aliceUtxos, "bob", 100.0);
+        // Submit the transaction to the ledger
+        ledger.submitTransaction(tx);
+    } else {
+        std::cout << "Alice has no UTXOs to spend." << std::endl;
+    }
 
-Handles block creation thread
+    // The system will automatically process transactions and create finality blocks in the background.
 
-Provides public API for:
-
-Submitting transactions
-
-Querying state
-
-Validator operations
-
-Workflow
-Transaction Creation:
-
-User creates transaction spending UTXOs
-
-Signs inputs with private key
-
-Selects parent transactions from DAG tips
-
-Transaction Processing:
-
-Transaction added to DAG
-
-Validated against UTXO set
-
-Updates DAG structure and tips
-
-Block Creation (every 30 seconds):
-
-Select validator based on stake
-
-Create block from current DAG tips
-
-Add block to finality chain
-
-Update validator information
-
-Validation:
-
-All transactions cryptographically verified
-
-UTXO existence and ownership checked
-
-No double spends allowed
-
-Error Handling
-Custom exception classes:
-
-CryptoError: Cryptographic operations
-
-TransactionError: Invalid transactions
-
-LedgerError: System-level issues
-
-All errors include descriptive messages and context.
-
-Thread Safety
-Critical sections protected by:
-
-std::mutex for exclusive access
-
-std::lock_guard for RAII locking
-
-Atomic flags for control variables
-
-Dependencies
-OpenSSL (crypto, ec, ecdsa, sha)
-
-C++17 standard library
-
-Usage Example
-Initialize system:
-HybridLedger ledger;
-auto key = CryptoHelper::generateKeyPair();
-ledger.addValidator("alice", std::move(key), 5000.0);
-
-Create transaction:
-auto utxos = ledger.getUTXOs("alice");
-Transaction tx = createTransaction(utxos, "bob", 100.0);
-ledger.submitTransaction(tx);
-
-System runs automatically:
-
-Processes transactions into DAG
-
-Creates finality blocks periodically
-
-Notes
-System designed for high throughput
-
-Configurable block interval
-
-Extensible for different consensus rules
-
-Production-ready error handling
+    return 0;
+}
