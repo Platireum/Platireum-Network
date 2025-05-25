@@ -1791,5 +1791,410 @@ int main(int argc, char* argv[]) {
     }
 }
 
+// ---------------------------
+// 12. Integration and Final Components
+// ---------------------------
+
+/**
+ * Node configuration settings
+ */
+struct NodeConfig {
+    double minStake = 1000.0;
+    int blockInterval = 30; // seconds
+    int maxPeers = 50;
+    bool enableSmartContracts = true;
+    bool enableNetworking = true;
+};
+
+/**
+ * Complete node implementation combining all components
+ */
+class HybridNode {
+private:
+    EnhancedHybridLedger ledger;
+    NodeConfig config;
+    std::atomic<bool> running{false};
+    std::thread blockThread;
+    std::thread networkThread;
+
+    // Thread function for periodic block creation
+    void blockCreationWorker() {
+        using namespace std::chrono;
+        
+        while (running) {
+            auto nextBlockTime = steady_clock::now() + seconds(config.blockInterval);
+            
+            try {
+                // Get current tips from DAG
+                auto tips = ledger.getTips(100);
+                
+                if (!tips.empty()) {
+                    // Select validator and create block
+                    std::string validator = ledger.selectValidator();
+                    auto block = ledger.createBlock(tips, validator);
+                    
+                    // Broadcast the new block
+                    if (config.enableNetworking) {
+                        ledger.broadcastBlock(block);
+                    }
+                    
+                    std::cout << "Created block #" << block.blockNumber 
+                              << " with " << tips.size() << " transactions" << std::endl;
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Block creation error: " << e.what() << std::endl;
+            }
+            
+            std::this_thread::sleep_until(nextBlockTime);
+        }
+    }
+
+    // Thread function for network processing
+    void networkWorker() {
+        while (running) {
+            // In a real implementation, this would handle network messages
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+    }
+
+public:
+    explicit HybridNode(NodeConfig cfg = {}) : config(std::move(cfg)) {
+        // Start services based on configuration
+        running = true;
+        
+        // Always start block creation thread
+        blockThread = std::thread(&HybridNode::blockCreationWorker, this);
+        
+        // Start network thread if enabled
+        if (config.enableNetworking) {
+            networkThread = std::thread(&HybridNode::networkWorker, this);
+        }
+    }
+
+    ~HybridNode() {
+        running = false;
+        
+        if (blockThread.joinable()) {
+            blockThread.join();
+        }
+        
+        if (networkThread.joinable()) {
+            networkThread.join();
+        }
+    }
+
+    // Get the ledger reference
+    EnhancedHybridLedger& getLedger() { return ledger; }
+    
+    // Get the configuration
+    const NodeConfig& getConfig() const { return config; }
+    
+    // Get node ID
+    std::string getNodeId() const { return ledger.getNodeId(); }
+};
+
+// ---------------------------
+// 13. CLI Interface
+// ---------------------------
+
+/**
+ * Simple command line interface for node interaction
+ */
+class NodeCLI {
+private:
+    HybridNode& node;
+    std::unordered_map<std::string, CryptoHelper::ECKeyPtr> wallets;
+    std::string currentUser;
+
+public:
+    explicit NodeCLI(HybridNode& n) : node(n) {}
+
+    void run() {
+        std::cout << "Hybrid Blockchain-DAG Node CLI\n";
+        std::cout << "Node ID: " << node.getNodeId() << "\n\n";
+        
+        while (true) {
+            if (currentUser.empty()) {
+                handleUnauthenticated();
+            } else {
+                handleAuthenticated();
+            }
+        }
+    }
+
+private:
+    void handleUnauthenticated() {
+        std::cout << "1. Create wallet\n";
+        std::cout << "2. Login\n";
+        std::cout << "3. Exit\n";
+        std::cout << "Select option: ";
+        
+        int choice;
+        std::cin >> choice;
+        
+        switch (choice) {
+            case 1: createWallet(); break;
+            case 2: login(); break;
+            case 3: exit(0);
+            default: std::cout << "Invalid option\n";
+        }
+    }
+
+    void handleAuthenticated() {
+        std::cout << "\nLogged in as: " << currentUser << "\n";
+        std::cout << "1. Check balance\n";
+        std::cout << "2. Send transaction\n";
+        std::cout << "3. Create smart contract\n";
+        std::cout << "4. Register as validator\n";
+        std::cout << "5. Network info\n";
+        std::cout << "6. Logout\n";
+        std::cout << "Select option: ";
+        
+        int choice;
+        std::cin >> choice;
+        
+        switch (choice) {
+            case 1: checkBalance(); break;
+            case 2: sendTransaction(); break;
+            case 3: createContract(); break;
+            case 4: registerValidator(); break;
+            case 5: networkInfo(); break;
+            case 6: currentUser = ""; break;
+            default: std::cout << "Invalid option\n";
+        }
+    }
+
+    void createWallet() {
+        auto key = CryptoHelper::generateKeyPair();
+        std::string address = CryptoHelper::getPublicKeyHex(key);
+        
+        wallets[address] = key;
+        currentUser = address;
+        
+        std::cout << "Created new wallet:\n";
+        std::cout << "Address: " << address << "\n";
+        
+        // Add some initial funds for testing
+        if (node.getLedger().getAddressUTXOs(address).empty()) {
+            TransactionOutput genesisUTXO{
+                "genesis",
+                0,
+                address,
+                1000.0
+            };
+            // This is just for testing - in a real system you'd need mining rewards
+            std::cout << "Added test funds to new wallet\n";
+        }
+    }
+
+    void login() {
+        std::cout << "Enter wallet address: ";
+        std::string address;
+        std::cin >> address;
+        
+        if (wallets.count(address) > 0) {
+            currentUser = address;
+            std::cout << "Logged in successfully\n";
+        } else {
+            std::cout << "Wallet not found\n";
+        }
+    }
+
+    void checkBalance() {
+        auto utxos = node.getLedger().getAddressUTXOs(currentUser);
+        double balance = 0.0;
+        
+        for (const auto& utxo : utxos) {
+            balance += utxo.amount;
+        }
+        
+        std::cout << "Balance: " << balance << "\n";
+        std::cout << "UTXOs: " << utxos.size() << "\n";
+    }
+
+    void sendTransaction() {
+        std::cout << "Enter recipient address: ";
+        std::string recipient;
+        std::cin >> recipient;
+        
+        std::cout << "Enter amount: ";
+        double amount;
+        std::cin >> amount;
+        
+        auto utxos = node.getLedger().getAddressUTXOs(currentUser);
+        if (utxos.empty()) {
+            std::cout << "No funds available\n";
+            return;
+        }
+        
+        try {
+            std::string txId = node.getLedger().createAndBroadcastTransaction(
+                wallets[currentUser], recipient, amount, utxos);
+            
+            std::cout << "Transaction created: " << txId << "\n";
+        } catch (const std::exception& e) {
+            std::cout << "Error: " << e.what() << "\n";
+        }
+    }
+
+    void createContract() {
+        if (!node.getConfig().enableSmartContracts) {
+            std::cout << "Smart contracts are disabled\n";
+            return;
+        }
+        
+        std::cout << "1. Time-lock contract\n";
+        std::cout << "2. Multi-signature contract\n";
+        std::cout << "3. Custom contract\n";
+        std::cout << "Select contract type: ";
+        
+        int choice;
+        std::cin >> choice;
+        
+        try {
+            switch (choice) {
+                case 1: {
+                    std::cout << "Enter recipient: ";
+                    std::string recipient;
+                    std::cin >> recipient;
+                    
+                    std::cout << "Enter amount: ";
+                    double amount;
+                    std::cin >> amount;
+                    
+                    std::cout << "Enter unlock time (minutes from now): ";
+                    int minutes;
+                    std::cin >> minutes;
+                    
+                    auto utxos = node.getLedger().getAddressUTXOs(currentUser);
+                    auto unlockTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()
+                    ).count() + (minutes * 60 * 1000);
+                    
+                    std::string txId = node.getLedger().createTimeLockTransaction(
+                        wallets[currentUser], recipient, amount, utxos, unlockTime);
+                    
+                    std::cout << "Created time-lock contract: " << txId << "\n";
+                    break;
+                }
+                
+                case 2: {
+                    std::cout << "Enter recipient: ";
+                    std::string recipient;
+                    std::cin >> recipient;
+                    
+                    std::cout << "Enter amount: ";
+                    double amount;
+                    std::cin >> amount;
+                    
+                    std::cout << "Enter number of required signatures: ";
+                    int required;
+                    std::cin >> required;
+                    
+                    std::vector<std::string> signers;
+                    std::cout << "Enter signer addresses (one per line, empty to finish):\n";
+                    std::cin.ignore();
+                    
+                    while (true) {
+                        std::string addr;
+                        std::getline(std::cin, addr);
+                        if (addr.empty()) break;
+                        signers.push_back(addr);
+                    }
+                    
+                    auto utxos = node.getLedger().getAddressUTXOs(currentUser);
+                    std::string txId = node.getLedger().createMultiSigTransaction(
+                        wallets[currentUser], recipient, amount, utxos, signers, required);
+                    
+                    std::cout << "Created multi-sig contract: " << txId << "\n";
+                    break;
+                }
+                
+                case 3: {
+                    std::cout << "Enter contract code:\n";
+                    std::cin.ignore();
+                    std::string code;
+                    std::getline(std::cin, code);
+                    
+                    std::string contractId = node.getLedger().createContract(
+                        SmartContract::ContractType::CUSTOM, code);
+                    
+                    std::cout << "Created custom contract: " << contractId << "\n";
+                    break;
+                }
+                
+                default:
+                    std::cout << "Invalid option\n";
+            }
+        } catch (const std::exception& e) {
+            std::cout << "Error: " << e.what() << "\n";
+        }
+    }
+
+    void registerValidator() {
+        std::cout << "Enter stake amount (min " << node.getConfig().minStake << "): ";
+        double stake;
+        std::cin >> stake;
+        
+        if (stake < node.getConfig().minStake) {
+            std::cout << "Stake too low\n";
+            return;
+        }
+        
+        try {
+            node.getLedger().registerValidator(wallets[currentUser], stake);
+            std::cout << "Registered as validator with stake: " << stake << "\n";
+        } catch (const std::exception& e) {
+            std::cout << "Error: " << e.what() << "\n";
+        }
+    }
+
+    void networkInfo() {
+        if (!node.getConfig().enableNetworking) {
+            std::cout << "Networking is disabled\n";
+            return;
+        }
+        
+        std::cout << "Node ID: " << node.getNodeId() << "\n";
+        std::cout << "Peers: " << node.getLedger().getPeers().size() << "\n";
+        std::cout << "DAG size: " << node.getLedger().getDAGSize() << "\n";
+        std::cout << "Blockchain height: " << node.getLedger().getBlockchainHeight() << "\n";
+    }
+};
+
+// ---------------------------
+// 14. Main Entry Point
+// ---------------------------
+
+int main(int argc, char* argv[]) {
+    try {
+        NodeConfig config;
+        
+        // Simple argument parsing
+        for (int i = 1; i < argc; ++i) {
+            std::string arg = argv[i];
+            if (arg == "--no-networking") {
+                config.enableNetworking = false;
+            } else if (arg == "--no-smart-contracts") {
+                config.enableSmartContracts = false;
+            } else if (arg == "--block-interval" && i+1 < argc) {
+                config.blockInterval = std::stoi(argv[++i]);
+            } else if (arg == "--min-stake" && i+1 < argc) {
+                config.minStake = std::stod(argv[++i]);
+            }
+        }
+        
+        HybridNode node(config);
+        NodeCLI cli(node);
+        cli.run();
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Fatal error: " << e.what() << std::endl;
+        return 1;
+    }
+    
+    return 0;
+}
+    
     return 0;
 }
