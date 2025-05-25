@@ -1086,6 +1086,710 @@ int main() {
         std::cerr << "Error: " << e.what() << std::endl;
         return 1;
     }
+// ---------------------------
+// 8. Smart Contract System
+// ---------------------------
+/**
+ * Simple smart contract support
+ * Supports execution of custom logic during transaction validation
+ */
+class SmartContract {
+public:
+    enum class ContractType {
+        SIMPLE_TRANSFER,
+        TIME_LOCK,
+        MULTI_SIG,
+        CUSTOM
+    };
+
+private:
+    std::string contractId;
+    ContractType type;
+    std::string code;
+    std::unordered_map<std::string, std::string> state;
+    std::mutex contractMutex;
+
+public:
+    SmartContract(ContractType cType, std::string contractCode) 
+        : type(cType), code(std::move(contractCode)) 
+    {
+        contractId = CryptoHelper::sha256(code + std::to_string(static_cast<int>(type)));
+    }
+
+    // Executes contract logic during transaction processing
+    bool execute(const Transaction& tx, const std::unordered_map<std::string, TransactionOutput>& utxoSet) {
+        std::lock_guard<std::mutex> lock(contractMutex);
+
+        switch (type) {
+            case ContractType::SIMPLE_TRANSFER:
+                return true; // Basic transfer always valid if inputs/outputs balance
+
+            case ContractType::TIME_LOCK:
+                return validateTimeLock(tx);
+
+            case ContractType::MULTI_SIG:
+                return validateMultiSig(tx, utxoSet);
+
+            case ContractType::CUSTOM:
+                return executeCustom(tx);
+
+            default:
+                return false;
+        }
+    }
+
+    // Get contract state value
+    std::optional<std::string> getState(const std::string& key) const {
+        std::lock_guard<std::mutex> lock(contractMutex);
+        
+        auto it = state.find(key);
+        if (it != state.end()) {
+            return it->second;
+        }
+        return std::nullopt;
+    }
+
+    // Set contract state value
+    void setState(const std::string& key, const std::string& value) {
+        std::lock_guard<std::mutex> lock(contractMutex);
+        state[key] = value;
+    }
+
+    // Get contract ID
+    const std::string& getId() const { return contractId; }
+
+    // Get contract type
+    ContractType getType() const { return type; }
+
+private:
+    // Time lock validation - checks if transaction is allowed to execute based on time
+    bool validateTimeLock(const Transaction& tx) {
+        auto lockTimeStr = getState("unlock_time");
+        if (!lockTimeStr) {
+            return false; // No unlock time found
+        }
+
+        std::int64_t unlockTime = std::stoll(*lockTimeStr);
+        std::int64_t currentTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()
+        ).count();
+
+        return currentTime >= unlockTime;
+    }
+
+    // Multi-signature validation
+    bool validateMultiSig(const Transaction& tx, const std::unordered_map<std::string, TransactionOutput>& utxoSet) {
+        auto requiredSignaturesStr = getState("required_signatures");
+        if (!requiredSignaturesStr) {
+            return false;
+        }
+
+        int requiredSignatures = std::stoi(*requiredSignaturesStr);
+        
+        // Get approved public keys
+        auto approvedKeysStr = getState("approved_keys");
+        if (!approvedKeysStr) {
+            return false;
+        }
+
+        std::unordered_set<std::string> approvedKeys;
+        std::stringstream ss(*approvedKeysStr);
+        std::string key;
+        while (std::getline(ss, key, ',')) {
+            approvedKeys.insert(key);
+        }
+
+        // Count valid signatures from approved keys
+        int validSignatures = 0;
+        std::unordered_set<std::string> usedKeys;
+
+        for (const auto& input : tx.getInputs()) {
+            if (approvedKeys.count(input.publicKey) > 0 && usedKeys.count(input.publicKey) == 0) {
+                // Verify this signature is valid
+                std::string dataToVerify = input.utxoId + tx.getId();
+                bool validSig = CryptoHelper::verifySignature(
+                    input.publicKey,
+                    hexToBytes(input.signature),
+                    dataToVerify
+                );
+                
+                if (validSig) {
+                    validSignatures++;
+                    usedKeys.insert(input.publicKey);
+                }
+            }
+        }
+
+        return validSignatures >= requiredSignatures;
+    }
+
+    // Execute custom contract code
+    bool executeCustom(const Transaction& tx) {
+        // In a real system, this might parse and execute script code
+        // For simplicity, we'll just check a flag in the state
+        auto enabledStr = getState("enabled");
+        return enabledStr && *enabledStr == "true";
+    }
+};
+
+/**
+ * Manages all smart contracts in the system
+ */
+class ContractManager {
+private:
+    std::unordered_map<std::string, SmartContract> contracts;
+    std::mutex contractsMutex;
+
+public:
+    // Register a new contract
+    std::string registerContract(SmartContract::ContractType type, const std::string& code) {
+        SmartContract contract(type, code);
+        std::string id = contract.getId();
+        
+        std::lock_guard<std::mutex> lock(contractsMutex);
+        contracts[id] = std::move(contract);
+        
+        return id;
+    }
+
+    // Get a contract by ID
+    std::optional<std::reference_wrapper<SmartContract>> getContract(const std::string& id) {
+        std::lock_guard<std::mutex> lock(contractsMutex);
+        
+        auto it = contracts.find(id);
+        if (it != contracts.end()) {
+            return std::ref(it->second);
+        }
+        return std::nullopt;
+    }
+
+    // Execute a contract
+    bool executeContract(const std::string& id, const Transaction& tx, 
+                        const std::unordered_map<std::string, TransactionOutput>& utxoSet) 
+    {
+        auto contractOpt = getContract(id);
+        if (!contractOpt) {
+            return false;
+        }
+        
+        return contractOpt->get().execute(tx, utxoSet);
+    }
+    
+    // Get all contract IDs
+    std::vector<std::string> getAllContractIds() const {
+        std::lock_guard<std::mutex> lock(contractsMutex);
+        
+        std::vector<std::string> ids;
+        ids.reserve(contracts.size());
+        
+        for (const auto& [id, _] : contracts) {
+            ids.push_back(id);
+        }
+        
+        return ids;
+    }
+};
+
+// ---------------------------
+// 9. Network Layer
+// ---------------------------
+/**
+ * Simple peer-to-peer network for node communication
+ * In a real implementation, this would use sockets or a library like ZeroMQ
+ */
+class NetworkMessage {
+public:
+    enum class MessageType {
+        TRANSACTION,
+        BLOCK,
+        PEER_DISCOVERY,
+        TRANSACTION_REQUEST,
+        BLOCK_REQUEST
+    };
+
+    MessageType type;
+    std::string payload;
+    std::string sender;
+    std::int64_t timestamp;
+
+    NetworkMessage(MessageType t, std::string p, std::string s)
+        : type(t), payload(std::move(p)), sender(std::move(s))
+    {
+        timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()
+        ).count();
+    }
+
+    // Serialize message for network transmission
+    std::string serialize() const {
+        std::stringstream ss;
+        ss << static_cast<int>(type) << "|"
+           << payload << "|"
+           << sender << "|"
+           << timestamp;
+        return ss.str();
+    }
+
+    // Deserialize message from network
+    static NetworkMessage deserialize(const std::string& data) {
+        std::stringstream ss(data);
+        std::string token;
+        
+        std::getline(ss, token, '|');
+        MessageType type = static_cast<MessageType>(std::stoi(token));
+        
+        std::getline(ss, token, '|');
+        std::string payload = token;
+        
+        std::getline(ss, token, '|');
+        std::string sender = token;
+        
+        NetworkMessage msg(type, payload, sender);
+        
+        std::getline(ss, token, '|');
+        msg.timestamp = std::stoll(token);
+        
+        return msg;
+    }
+};
+
+class NetworkNode {
+private:
+    std::string nodeId;
+    std::unordered_set<std::string> peers;
+    std::function<void(const NetworkMessage&)> messageHandler;
+    std::thread networkThread;
+    std::atomic<bool> running{false};
+    std::mutex peersMutex;
+    
+    // Queue of incoming messages
+    std::vector<NetworkMessage> messageQueue;
+    std::mutex queueMutex;
+    std::condition_variable queueCV;
+
+    // Simulate network communication
+    void networkWorker() {
+        while (running) {
+            // Process message queue
+            std::unique_lock<std::mutex> lock(queueMutex);
+            if (messageQueue.empty()) {
+                // Wait for new messages with timeout
+                queueCV.wait_for(lock, std::chrono::seconds(1));
+            } else {
+                // Get next message
+                NetworkMessage msg = messageQueue.back();
+                messageQueue.pop_back();
+                lock.unlock();
+                
+                // Handle message
+                if (messageHandler) {
+                    messageHandler(msg);
+                }
+            }
+        }
+    }
+
+public:
+    NetworkNode(std::string id) : nodeId(std::move(id)) {
+        // Generate random node ID if not provided
+        if (nodeId.empty()) {
+            std::random_device rd;
+            std::mt19937 rng(rd());
+            std::uniform_int_distribution<> dist(10000, 99999);
+            nodeId = "node_" + std::to_string(dist(rng));
+        }
+    }
+
+    ~NetworkNode() {
+        stop();
+    }
+
+    // Start node's network thread
+    void start() {
+        running = true;
+        networkThread = std::thread(&NetworkNode::networkWorker, this);
+    }
+
+    // Stop node's network thread
+    void stop() {
+        running = false;
+        if (networkThread.joinable()) {
+            networkThread.join();
+        }
+    }
+
+    // Set message handler callback
+    void setMessageHandler(std::function<void(const NetworkMessage&)> handler) {
+        messageHandler = std::move(handler);
+    }
+
+    // Connect to another peer
+    bool addPeer(const std::string& peerId) {
+        std::lock_guard<std::mutex> lock(peersMutex);
+        if (peerId != nodeId) {
+            peers.insert(peerId);
+            return true;
+        }
+        return false;
+    }
+
+    // Remove a peer
+    bool removePeer(const std::string& peerId) {
+        std::lock_guard<std::mutex> lock(peersMutex);
+        return peers.erase(peerId) > 0;
+    }
+
+    // Broadcast message to all peers
+    void broadcast(NetworkMessage::MessageType type, const std::string& payload) {
+        std::lock_guard<std::mutex> lockPeers(peersMutex);
+        NetworkMessage msg(type, payload, nodeId);
+        
+        for (const auto& peer : peers) {
+            // In a real implementation, this would send over network
+            // Here we just queue the message for simulation
+            receiveMessage(msg);
+        }
+    }
+
+    // Send message to specific peer
+    void sendTo(const std::string& peerId, NetworkMessage::MessageType type, const std::string& payload) {
+        std::lock_guard<std::mutex> lockPeers(peersMutex);
+        if (peers.count(peerId) > 0) {
+            NetworkMessage msg(type, payload, nodeId);
+            // In a real implementation, send to specific peer
+            receiveMessage(msg);
+        }
+    }
+
+    // Handle incoming message
+    void receiveMessage(const NetworkMessage& msg) {
+        std::lock_guard<std::mutex> lock(queueMutex);
+        messageQueue.push_back(msg);
+        queueCV.notify_one();
+    }
+
+    // Get node ID
+    const std::string& getId() const { return nodeId; }
+
+    // Get peers
+    std::unordered_set<std::string> getPeers() const {
+        std::lock_guard<std::mutex> lock(peersMutex);
+        return peers;
+    }
+};
+
+// ---------------------------
+// 10. Enhanced HybridLedger
+// ---------------------------
+/**
+ * An enhanced version of the HybridLedger class with 
+ * smart contract and networking support
+ */
+class EnhancedHybridLedger : public HybridLedger {
+private:
+    ContractManager contractManager;
+    NetworkNode network;
+    
+    // Handle network messages
+    void processNetworkMessage(const NetworkMessage& msg) {
+        try {
+            switch (msg.type) {
+                case NetworkMessage::MessageType::TRANSACTION: {
+                    // Deserialize and add transaction
+                    // In a real system, this would involve proper serialization
+                    auto txOpt = getTransaction(msg.payload);
+                    if (!txOpt) {
+                        // This is simplified; in reality we'd deserialize the full tx
+                        std::cout << "Received transaction: " << msg.payload << std::endl;
+                    }
+                    break;
+                }
+                
+                case NetworkMessage::MessageType::BLOCK: {
+                    // Deserialize and add block
+                    std::cout << "Received block: " << msg.payload << std::endl;
+                    break;
+                }
+                
+                case NetworkMessage::MessageType::PEER_DISCOVERY: {
+                    // Add new peer to network
+                    network.addPeer(msg.payload);
+                    std::cout << "Discovered peer: " << msg.payload << std::endl;
+                    break;
+                }
+                
+                case NetworkMessage::MessageType::TRANSACTION_REQUEST: {
+                    // Respond with requested transaction
+                    auto txOpt = getTransaction(msg.payload);
+                    if (txOpt) {
+                        // Simplified; would serialize full tx in reality
+                        network.sendTo(msg.sender, NetworkMessage::MessageType::TRANSACTION, 
+                                    msg.payload);
+                    }
+                    break;
+                }
+                
+                case NetworkMessage::MessageType::BLOCK_REQUEST: {
+                    // Respond with requested block
+                    // This is simplified
+                    std::cout << "Block requested: " << msg.payload << std::endl;
+                    break;
+                }
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Error processing message: " << e.what() << std::endl;
+        }
+    }
+    
+public:
+    EnhancedHybridLedger() : HybridLedger(), network("node1") {
+        // Set up network message handler
+        network.setMessageHandler([this](const NetworkMessage& msg) {
+            this->processNetworkMessage(msg);
+        });
+        
+        // Start network services
+        network.start();
+    }
+    
+    ~EnhancedHybridLedger() {
+        network.stop();
+    }
+    
+    // Create a new smart contract
+    std::string createContract(SmartContract::ContractType type, const std::string& code) {
+        return contractManager.registerContract(type, code);
+    }
+    
+    // Execute a contract with a transaction
+    bool executeContract(const std::string& contractId, const Transaction& tx) {
+        return contractManager.executeContract(contractId, tx, getUTXOSetCopy());
+    }
+    
+    // Get UTXO set copy for contract execution
+    std::unordered_map<std::string, TransactionOutput> getUTXOSetCopy() const {
+        // This would be implemented to provide a copy of the current UTXO set
+        // For simplicity, we're returning an empty set here
+        return {};
+    }
+    
+    // Create and broadcast a transaction
+    std::string createAndBroadcastTransaction(
+        const CryptoHelper::ECKeyPtr& senderKey,
+        const std::string& recipient,
+        double amount,
+        const std::vector<TransactionOutput>& inputs) 
+    {
+        std::string txId = createTransaction(senderKey, recipient, amount, inputs);
+        
+        // Broadcast to network
+        network.broadcast(NetworkMessage::MessageType::TRANSACTION, txId);
+        
+        return txId;
+    }
+    
+    // Create a time-locked transaction
+    std::string createTimeLockTransaction(
+        const CryptoHelper::ECKeyPtr& senderKey,
+        const std::string& recipient,
+        double amount,
+        const std::vector<TransactionOutput>& inputs,
+        std::int64_t unlockTime)
+    {
+        std::string txId = createTransaction(senderKey, recipient, amount, inputs);
+        
+        // Create time-lock contract
+        std::string code = "time_lock:" + recipient + ":" + std::to_string(amount);
+        std::string contractId = contractManager.registerContract(
+            SmartContract::ContractType::TIME_LOCK, code);
+            
+        auto contractOpt = contractManager.getContract(contractId);
+        if (contractOpt) {
+            contractOpt->get().setState("unlock_time", std::to_string(unlockTime));
+            contractOpt->get().setState("transaction_id", txId);
+        }
+        
+        return txId;
+    }
+    
+    // Create a multi-signature transaction
+    std::string createMultiSigTransaction(
+        const CryptoHelper::ECKeyPtr& senderKey,
+        const std::string& recipient,
+        double amount,
+        const std::vector<TransactionOutput>& inputs,
+        const std::vector<std::string>& approvedKeys,
+        int requiredSignatures)
+    {
+        std::string txId = createTransaction(senderKey, recipient, amount, inputs);
+        
+        // Create multi-sig contract
+        std::string code = "multi_sig:" + recipient + ":" + std::to_string(amount);
+        std::string contractId = contractManager.registerContract(
+            SmartContract::ContractType::MULTI_SIG, code);
+            
+        auto contractOpt = contractManager.getContract(contractId);
+        if (contractOpt) {
+            // Join approved keys with commas
+            std::stringstream ss;
+            for (size_t i = 0; i < approvedKeys.size(); ++i) {
+                if (i > 0) ss << ",";
+                ss << approvedKeys[i];
+            }
+            
+            contractOpt->get().setState("approved_keys", ss.str());
+            contractOpt->get().setState("required_signatures", std::to_string(requiredSignatures));
+            contractOpt->get().setState("transaction_id", txId);
+        }
+        
+        return txId;
+    }
+    
+    // Add a network peer
+    bool addPeer(const std::string& peerId) {
+        return network.addPeer(peerId);
+    }
+    
+    // Broadcast block creation
+    void broadcastBlock(const FinalityChain::Block& block) {
+        // Simplified; would serialize block in reality
+        network.broadcast(NetworkMessage::MessageType::BLOCK, block.blockHash);
+    }
+    
+    // Get network node ID
+    std::string getNodeId() const {
+        return network.getId();
+    }
+    
+    // Get network peers
+    std::vector<std::string> getPeers() const {
+        auto peerSet = network.getPeers();
+        return std::vector<std::string>(peerSet.begin(), peerSet.end());
+    }
+};
+
+// ---------------------------
+// 11. Enhanced Example Usage
+// ---------------------------
+
+int enhancedMain() {
+    try {
+        // Initialize the enhanced hybrid ledger
+        EnhancedHybridLedger ledger;
+        
+        std::cout << "Node ID: " << ledger.getNodeId() << std::endl;
+
+        // Create some user key pairs
+        auto aliceKey = CryptoHelper::generateKeyPair();
+        auto bobKey = CryptoHelper::generateKeyPair();
+        auto charlieKey = CryptoHelper::generateKeyPair();
+        
+        std::string aliceAddr = CryptoHelper::getPublicKeyHex(aliceKey);
+        std::string bobAddr = CryptoHelper::getPublicKeyHex(bobKey);
+        std::string charlieAddr = CryptoHelper::getPublicKeyHex(charlieKey);
+
+        // Alice registers as a validator with 5000 stake
+        ledger.registerValidator(aliceKey, 5000.0);
+
+        // Give Alice some initial funds (simulate mining reward)
+        TransactionOutput genesisUTXO{
+            "genesis",
+            0,
+            aliceAddr,
+            10000.0
+        };
+
+        // Create a standard transaction from Alice to Bob
+        std::vector<TransactionOutput> inputs = {genesisUTXO};
+        std::string standardTxId = ledger.createAndBroadcastTransaction(
+            aliceKey, bobAddr, 250.0, inputs);
+        
+        std::cout << "Created standard transaction: " << standardTxId << std::endl;
+
+        // Create a time-locked transaction from Alice to Charlie
+        // that will unlock in 1 hour
+        std::int64_t oneHour = 60 * 60 * 1000; // 1 hour in milliseconds
+        std::int64_t unlockTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()
+        ).count() + oneHour;
+        
+        TransactionOutput aliceUTXO = ledger.getAddressUTXOs(aliceAddr)[0]; // Simplified
+        
+        std::string timeLockTxId = ledger.createTimeLockTransaction(
+            aliceKey, charlieAddr, 500.0, {aliceUTXO}, unlockTime);
+            
+        std::cout << "Created time-locked transaction: " << timeLockTxId << std::endl;
+        std::cout << "Will unlock at: " << unlockTime << std::endl;
+
+        // Create a multi-signature transaction requiring 2 out of 3 signatures
+        std::vector<std::string> approvedKeys = {aliceAddr, bobAddr, charlieAddr};
+        
+        aliceUTXO = ledger.getAddressUTXOs(aliceAddr)[0]; // Simplified
+        
+        std::string multiSigTxId = ledger.createMultiSigTransaction(
+            aliceKey, bobAddr, 1000.0, {aliceUTXO}, approvedKeys, 2);
+            
+        std::cout << "Created multi-signature transaction: " << multiSigTxId << std::endl;
+
+        // Create a simple smart contract
+        std::string contractCode = "function transfer(from, to, amount) { "
+                                  "  if (from.balance >= amount) { "
+                                  "    from.balance -= amount; "
+                                  "    to.balance += amount; "
+                                  "    return true; "
+                                  "  } "
+                                  "  return false; "
+                                  "}";
+                                  
+        std::string contractId = ledger.createContract(
+            SmartContract::ContractType::CUSTOM, contractCode);
+            
+        std::cout << "Created smart contract: " << contractId << std::endl;
+
+        // Connect to another peer (simplified simulation)
+        ledger.addPeer("node2");
+        
+        std::cout << "Connected peers: ";
+        for (const auto& peer : ledger.getPeers()) {
+            std::cout << peer << " ";
+        }
+        std::cout << std::endl;
+
+        // Wait for some blocks to be created
+        std::cout << "Waiting for blocks to be created..." << std::endl;
+        std::this_thread::sleep_for(std::chrono::seconds(10));
+
+        // Print blockchain info
+        auto latestBlock = ledger.getLatestBlock();
+        if (latestBlock) {
+            std::cout << "Latest block: #" << latestBlock->blockNumber 
+                      << " with " << latestBlock->transactions.size() 
+                      << " transactions" << std::endl;
+                      
+            // Broadcast block
+            ledger.broadcastBlock(*latestBlock);
+        }
+
+        std::cout << "Total transactions in DAG: " << ledger.getDAGSize() << std::endl;
+        std::cout << "Blockchain height: " << ledger.getBlockchainHeight() << std::endl;
+
+    } catch (const std::exception& e) {
+        std::cerr << "Error in enhanced example: " << e.what() << std::endl;
+        return 1;
+    }
+
+    return 0;
+}
+
+// Alternative main function to select example mode
+int main(int argc, char* argv[]) {
+    if (argc > 1 && std::string(argv[1]) == "enhanced") {
+        return enhancedMain();
+    } else {
+        std::cout << "Running basic example mode. Use 'enhanced' argument for advanced features.\n" << std::endl;
+        return main(); // Call the original main
+    }
+}
 
     return 0;
 }
