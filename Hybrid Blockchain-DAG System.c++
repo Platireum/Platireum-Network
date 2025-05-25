@@ -22,6 +22,11 @@
 #include <stdexcept>
 #include <iostream>
 #include <ctime>
+#include <thread>
+#include <atomic>
+#include <mutex>
+#include <optional>
+#include <iomanip>
 #include <openssl/ec.h>
 #include <openssl/ecdsa.h>
 #include <openssl/sha.h>
@@ -590,6 +595,18 @@ public:
         }
         return result;
     }
+    
+    // Get total number of transactions
+    size_t getTransactionCount() const {
+        std::lock_guard<std::mutex> lock(txMutex);
+        return transactions.size();
+    }
+    
+    // Get UTXO set copy for external validation
+    std::unordered_map<std::string, TransactionOutput> getUTXOSet() const {
+        std::lock_guard<std::mutex> lock(txMutex);
+        return utxoSet;
+    }
 };
 
 // ---------------------------
@@ -687,6 +704,12 @@ public:
     int getHeight() const {
         std::lock_guard<std::mutex> lock(chainMutex);
         return static_cast<int>(blocks.size());
+    }
+    
+    // Get all blocks
+    std::vector<Block> getAllBlocks() const {
+        std::lock_guard<std::mutex> lock(chainMutex);
+        return blocks;
     }
 };
 
@@ -788,6 +811,26 @@ public:
         
         return it->second.stake;
     }
+    
+    // Get all validators
+    std::vector<std::string> getAllValidators() const {
+        std::lock_guard<std::mutex> lock(validatorMutex);
+        
+        std::vector<std::string> result;
+        result.reserve(validators.size());
+        
+        for (const auto& [addr, info] : validators) {
+            result.push_back(addr);
+        }
+        
+        return result;
+    }
+    
+    // Get total stake
+    double getTotalStake() const {
+        std::lock_guard<std::mutex> lock(validatorMutex);
+        return totalStake;
+    }
 };
 
 // ---------------------------
@@ -829,4 +872,220 @@ private:
                     auto block = chain.createBlock(tips, validator);
                     
                     // Update validator's last block time
-                    validators.updateBlockTime(validator,
+                    validators.updateBlockTime(validator, block.timestamp);
+                    
+                                       std::cout << "Block #" << block.blockNumber << " created by " << validator 
+                              << " with " << tips.size() << " transactions" << std::endl;
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Error in block creation: " << e.what() << std::endl;
+            }
+            
+            // Sleep until next block time
+            std::this_thread::sleep_until(nextBlockTime);
+        }
+    }
+
+public:
+    HybridLedger() {
+        // Start with a genesis validator
+        auto genesisKey = CryptoHelper::generateKeyPair();
+        std::string genesisAddr = CryptoHelper::getPublicKeyHex(genesisKey);
+        validators.addValidator(genesisAddr, genesisKey, MIN_STAKE * 10);
+        
+        // Start block creation thread
+        running = true;
+        blockThread = std::thread(&HybridLedger::blockCreationWorker, this);
+    }
+
+    ~HybridLedger() {
+        running = false;
+        if (blockThread.joinable()) {
+            blockThread.join();
+        }
+    }
+
+    // Add a new transaction to the DAG
+    bool addTransaction(const Transaction& tx) {
+        return dag.addTransaction(tx);
+    }
+
+    // Create and add a new transaction
+    std::string createTransaction(
+        const CryptoHelper::ECKeyPtr& senderKey,
+        const std::string& recipient,
+        double amount,
+        const std::vector<TransactionOutput>& inputs)
+    {
+        // Validate inputs
+        double inputTotal = 0.0;
+        for (const auto& input : inputs) {
+            if (!dag.isUTXOAvailable(input.getId())) {
+                throw TransactionError("Input UTXO not available: " + input.getId());
+            }
+            inputTotal += input.amount;
+        }
+
+        if (amount <= 0 || inputTotal < amount) {
+            throw TransactionError("Invalid transaction amount");
+        }
+
+        // Create transaction outputs
+        std::vector<TransactionOutput> outputs;
+        
+        // Payment to recipient
+        outputs.push_back({
+            "", // Will be set by Transaction constructor
+            0,
+            recipient,
+            amount
+        });
+
+        // Change back to sender (if any)
+        double change = inputTotal - amount;
+        if (change > 0) {
+            std::string senderAddr = CryptoHelper::getPublicKeyHex(senderKey);
+            outputs.push_back({
+                "", // Will be set by Transaction constructor
+                1,
+                senderAddr,
+                change
+            });
+        }
+
+        // Create signed inputs
+        std::vector<TransactionInput> signedInputs;
+        std::vector<std::string> parentTips = dag.getTips(2); // Reference 2 parent tips
+
+        for (const auto& input : inputs) {
+            signedInputs.push_back(Transaction::createSignedInput(
+                input.getId(),
+                senderKey,
+                "" // Will be set by Transaction constructor
+            ));
+        }
+
+        // Create and add transaction
+        Transaction tx(signedInputs, outputs, parentTips);
+        if (!dag.addTransaction(tx)) {
+            throw TransactionError("Failed to add transaction to DAG");
+        }
+
+        return tx.getId();
+    }
+
+    // Register as a validator
+    bool registerValidator(const CryptoHelper::ECKeyPtr& key, double stake) {
+        if (stake < MIN_STAKE) {
+            throw LedgerError("Stake amount too low");
+        }
+
+        std::string address = CryptoHelper::getPublicKeyHex(key);
+        validators.addValidator(address, key, stake);
+        return true;
+    }
+
+    // Get transaction by ID
+    std::optional<Transaction> getTransaction(const std::string& txId) const {
+        return dag.getTransaction(txId);
+    }
+
+    // Get UTXOs for an address
+    std::vector<TransactionOutput> getAddressUTXOs(const std::string& address) const {
+        return dag.getAddressUTXOs(address);
+    }
+
+    // Get current DAG size
+    size_t getDAGSize() const {
+        return dag.getTransactionCount();
+    }
+
+    // Get blockchain height
+    int getBlockchainHeight() const {
+        return chain.getHeight();
+    }
+
+    // Get validator information
+    double getValidatorStake(const std::string& address) const {
+        return validators.getValidatorStake(address);
+    }
+
+    // Get total staked amount
+    double getTotalStake() const {
+        return validators.getTotalStake();
+    }
+
+    // Get latest block
+    std::optional<FinalityChain::Block> getLatestBlock() const {
+        return chain.getLatestBlock();
+    }
+
+    // Get all blocks
+    std::vector<FinalityChain::Block> getAllBlocks() const {
+        return chain.getAllBlocks();
+    }
+};
+
+// ---------------------------
+// 7. Example Usage
+// ---------------------------
+
+int main() {
+    try {
+        // Initialize the hybrid ledger
+        HybridLedger ledger;
+
+        // Create some user key pairs
+        auto aliceKey = CryptoHelper::generateKeyPair();
+        auto bobKey = CryptoHelper::generateKeyPair();
+        
+        std::string aliceAddr = CryptoHelper::getPublicKeyHex(aliceKey);
+        std::string bobAddr = CryptoHelper::getPublicKeyHex(bobKey);
+
+        // Alice registers as a validator with 5000 stake
+        ledger.registerValidator(aliceKey, 5000.0);
+
+        // Give Alice some initial funds (simulate mining reward)
+        TransactionOutput genesisUTXO{
+            "genesis",
+            0,
+            aliceAddr,
+            10000.0
+        };
+
+        // Create a transaction from Alice to Bob
+        std::vector<TransactionOutput> inputs = {genesisUTXO};
+        std::string txId = ledger.createTransaction(aliceKey, bobAddr, 250.0, inputs);
+        
+        std::cout << "Created transaction: " << txId << std::endl;
+
+        // Check Bob's balance
+        auto bobUTXOs = ledger.getAddressUTXOs(bobAddr);
+        double bobBalance = 0.0;
+        for (const auto& utxo : bobUTXOs) {
+            bobBalance += utxo.amount;
+        }
+        
+        std::cout << "Bob's balance: " << bobBalance << std::endl;
+
+        // Wait for some blocks to be created
+        std::this_thread::sleep_for(std::chrono::seconds(60));
+
+        // Print blockchain info
+        auto latestBlock = ledger.getLatestBlock();
+        if (latestBlock) {
+            std::cout << "Latest block: #" << latestBlock->blockNumber 
+                      << " with " << latestBlock->transactions.size() 
+                      << " transactions" << std::endl;
+        }
+
+        std::cout << "Total transactions in DAG: " << ledger.getDAGSize() << std::endl;
+        std::cout << "Blockchain height: " << ledger.getBlockchainHeight() << std::endl;
+
+    } catch (const std::exception& e) {
+        std::cerr << "Error: " << e.what() << std::endl;
+        return 1;
+    }
+
+    return 0;
+}
