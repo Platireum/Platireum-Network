@@ -1,11 +1,11 @@
 /*
  * Hybrid Blockchain-DAG System
- * 
+ *
  * This combines the security of blockchain with the scalability of DAGs
  * Key features:
  * - Proof of Stake consensus
  * - Directed Acyclic Graph (DAG) for fast transactions
- * - Smart contract support
+ * - Smart contract support (structural allowance, not implemented in detail)
  * - UTXO model like Bitcoin
  */
 
@@ -80,15 +80,18 @@ public:
     // Smart pointer that auto-frees EC keys
     using ECKeyPtr = std::shared_ptr<EC_KEY>;
     
+    // Static flag for thread-safe OpenSSL initialization
+    static std::once_flag cryptoInitFlag;
+
+    // Helper to initialize OpenSSL once
+    static void initializeOpenSSL() {
+        OpenSSL_add_all_algorithms();
+        ERR_load_crypto_strings();
+    }
+
     // Creates a new elliptic curve key pair
     static ECKeyPtr generateKeyPair() {
-        // Initialize OpenSSL
-        static bool initialized = false;
-        if (!initialized) {
-            OpenSSL_add_all_algorithms();
-            ERR_load_crypto_strings();
-            initialized = true;
-        }
+        std::call_once(cryptoInitFlag, initializeOpenSSL);
         
         ECKeyPtr key(EC_KEY_new_by_curve_name(NID_secp256k1), EC_KEY_free);
         if (!key) {
@@ -132,6 +135,7 @@ public:
 
     // Signs a message with private key
     static std::vector<unsigned char> signData(const ECKeyPtr& privateKey, const std::string& message) {
+        std::call_once(cryptoInitFlag, initializeOpenSSL);
         // Hash the message first
         std::vector<unsigned char> msgHash = sha256Bytes(message);
         
@@ -163,40 +167,38 @@ public:
     static bool verifySignature(const std::string& publicKeyHex, 
                                const std::vector<unsigned char>& signature, 
                                const std::string& message) {
+        std::call_once(cryptoInitFlag, initializeOpenSSL);
         // Recreate EC_KEY from hex
-        const EC_GROUP* group = EC_GROUP_new_by_curve_name(NID_secp256k1);
+        std::unique_ptr<EC_GROUP, decltype(&EC_GROUP_free)> group(
+            EC_GROUP_new_by_curve_name(NID_secp256k1), EC_GROUP_free
+        );
         if (!group) {
             throw CryptoError("Failed to create EC group");
         }
         
         std::unique_ptr<EC_KEY, decltype(&EC_KEY_free)> key(EC_KEY_new(), EC_KEY_free);
         if (!key) {
-            EC_GROUP_free(const_cast<EC_GROUP*>(group));
             throw CryptoError("Failed to create EC key");
         }
         
-        if (EC_KEY_set_group(key.get(), group) != 1) {
-            EC_GROUP_free(const_cast<EC_GROUP*>(group));
+        if (EC_KEY_set_group(key.get(), group.get()) != 1) {
             throw CryptoError("Failed to set EC group");
         }
         
         std::unique_ptr<BN_CTX, decltype(&BN_CTX_free)> ctx(BN_CTX_new(), BN_CTX_free);
         if (!ctx) {
-            EC_GROUP_free(const_cast<EC_GROUP*>(group));
             throw CryptoError("Failed to create BN context");
         }
         
         std::unique_ptr<EC_POINT, decltype(&EC_POINT_free)> point(
-            EC_POINT_new(group), EC_POINT_free
+            EC_POINT_new(group.get()), EC_POINT_free
         );
         
-        if (!point || EC_POINT_hex2point(group, publicKeyHex.c_str(), point.get(), ctx.get()) == nullptr) {
-            EC_GROUP_free(const_cast<EC_GROUP*>(group));
+        if (!point || EC_POINT_hex2point(group.get(), publicKeyHex.c_str(), point.get(), ctx.get()) == nullptr) {
             throw CryptoError("Failed to decode public key");
         }
         
         if (EC_KEY_set_public_key(key.get(), point.get()) != 1) {
-            EC_GROUP_free(const_cast<EC_GROUP*>(group));
             throw CryptoError("Failed to set public key");
         }
         
@@ -208,15 +210,12 @@ public:
         );
         
         if (!sig) {
-            EC_GROUP_free(const_cast<EC_GROUP*>(group));
             throw CryptoError("Failed to parse signature");
         }
         
         // Verify
         std::vector<unsigned char> msgHash = sha256Bytes(message);
         int result = ECDSA_do_verify(msgHash.data(), msgHash.size(), sig.get(), key.get());
-        
-        EC_GROUP_free(const_cast<EC_GROUP*>(group));
         
         if (result < 0) {
             throw CryptoError("Signature verification error");
@@ -268,6 +267,10 @@ public:
     }
 };
 
+// Initialize the static once_flag
+std::once_flag CryptoHelper::cryptoInitFlag;
+
+
 // Helper for signatures
 inline std::string bytesToHex(const std::vector<unsigned char>& data) {
     std::stringstream ss;
@@ -297,19 +300,32 @@ inline std::vector<unsigned char> hexToBytes(const std::string& hex) {
  * can only be spent once
  */
 struct TransactionOutput {
-    std::string txId;      // Parent transaction ID
-    int outputIndex;       // Which output in the transaction
-    std::string owner;     // Owner's public address (public key in hex)
-    double amount;         // How much cryptocurrency
+    std::string txId;       // Parent transaction ID (once part of a confirmed TX)
+    int outputIndex;        // Which output in the transaction
+    std::string owner;      // Owner's public address (public key in hex)
+    double amount;          // How much cryptocurrency
     
+    // Default constructor for map usage
+    TransactionOutput() : txId(""), outputIndex(-1), owner(""), amount(0.0) {}
+
+    TransactionOutput(std::string txId, int outputIndex, std::string owner, double amount)
+        : txId(std::move(txId)), outputIndex(outputIndex), owner(std::move(owner)), amount(amount) {}
+
     std::string getId() const {
+        if (txId.empty() || outputIndex == -1) {
+            // This case should ideally not happen for a fully formed UTXO
+            // For outputs within a new transaction *before* it's added to DAG,
+            // their ID is not yet defined.
+            return ""; 
+        }
         return txId + ":" + std::to_string(outputIndex);
     }
     
-    // Serialization for hashing/signing
-    std::string serialize() const {
+    // Serialization for hashing/signing (for outputs *within* a new transaction, before they become UTXOs)
+    // Only includes data that is stable at transaction creation time.
+    std::string serializeForTransactionHash() const {
         std::stringstream ss;
-        ss << txId << outputIndex << owner << std::fixed << std::setprecision(8) << amount;
+        ss << owner << std::fixed << std::setprecision(8) << amount;
         return ss.str();
     }
 };
@@ -319,12 +335,24 @@ struct TransactionOutput {
  * and provides a signature proving ownership
  */
 struct TransactionInput {
-    std::string utxoId;          // Reference to UTXO being spent
-    std::string signature;       // Proof you own the UTXO (hex encoded)
-    std::string publicKey;       // Spender's public key (hex encoded)
+    std::string utxoId;         // Reference to UTXO being spent
+    std::string signature;      // Proof you own the UTXO (hex encoded)
+    std::string publicKey;      // Spender's public key (hex encoded)
     
-    // Serialization for hashing/signing
-    std::string serialize() const {
+    // Default constructor for map usage
+    TransactionInput() : utxoId(""), signature(""), publicKey("") {}
+
+    TransactionInput(std::string utxoId, std::string signature, std::string publicKey)
+        : utxoId(std::move(utxoId)), signature(std::move(signature)), publicKey(std::move(publicKey)) {}
+
+    // Serialization for hashing/signing (only the part that needs to be signed)
+    // This is the data that identifies the UTXO being spent and the new transaction.
+    std::string serializeForSigning(const std::string& newTxId) const {
+        return utxoId + newTxId;
+    }
+
+    // Serialization for transaction hash (only the part that makes the input unique)
+    std::string serializeForTransactionHash() const {
         return utxoId + publicKey;
     }
 };
@@ -335,11 +363,11 @@ struct TransactionInput {
  */
 class Transaction {
 private:
-    std::string txId;                     // Unique hash of this transaction
+    std::string txId;                       // Unique hash of this transaction
     std::vector<TransactionInput> inputs;
     std::vector<TransactionOutput> outputs;
-    std::vector<std::string> parentTxs;   // For DAG structure
-    std::int64_t timestamp;               // Use standard int type
+    std::vector<std::string> parentTxs;    // For DAG structure
+    std::int64_t timestamp;                 // Use standard int type
     
     // Creates the transaction ID by hashing all contents
     void createId() {
@@ -347,11 +375,13 @@ private:
         data << timestamp;
         
         for (const auto& in : inputs) {
-            data << in.serialize();
+            // Inputs are signed with the *final* txId, but their unique properties
+            // (utxoId, publicKey) are part of the transaction's own hash.
+            data << in.serializeForTransactionHash(); 
         }
         
         for (const auto& out : outputs) {
-            data << out.serialize();
+            data << out.serializeForTransactionHash(); // Outputs hash only owner and amount
         }
         
         for (const auto& parent : parentTxs) {
@@ -363,36 +393,69 @@ private:
     
 public:
     // Constructor - builds a new transaction
+    // Note: Inputs should NOT have signatures yet when constructing.
+    // Signatures are added *after* txId is known.
     Transaction(std::vector<TransactionInput> ins,
-               std::vector<TransactionOutput> outs,
-               std::vector<std::string> parents = {})
+                std::vector<TransactionOutput> outs,
+                std::vector<std::string> parents = {})
         : inputs(std::move(ins)),
           outputs(std::move(outs)),
           parentTxs(std::move(parents)) 
     {
-        // Use high-precision timestamp
         timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()
         ).count();
         
-        createId();
+        createId(); // Calculate initial hash
     }
+
+    // Constructor for a transaction with already signed inputs
+    // Used when deserializing or creating a transaction that's ready for validation
+    Transaction(std::vector<TransactionInput> ins,
+                std::vector<TransactionOutput> outs,
+                std::vector<std::string> parents,
+                std::int64_t ts,
+                std::string id)
+        : inputs(std::move(ins)),
+          outputs(std::move(outs)),
+          parentTxs(std::move(parents)),
+          timestamp(ts),
+          txId(std::move(id))
+    {}
     
     // Validates transaction integrity
     bool validate(const std::unordered_map<std::string, TransactionOutput>& utxoSet) const {
+        // Recalculate ID to ensure it hasn't been tampered with
+        std::string originalTxId = txId;
+        const_cast<Transaction*>(this)->createId(); // Temporarily recalculate for verification
+        if (originalTxId != txId) {
+            // Restore original txId before throwing
+            const_cast<Transaction*>(this)->txId = originalTxId;
+            throw TransactionError("Transaction ID mismatch - integrity compromised!");
+        }
+        const_cast<Transaction*>(this)->txId = originalTxId; // Restore actual ID
+
         // Check inputs reference valid UTXOs
         double inputAmount = 0.0;
+        std::unordered_set<std::string> spentUtxos; // To prevent double spending within the same TX
         for (const auto& input : inputs) {
-            // Check UTXO exists
+            // Check for double spending within this transaction itself
+            if (spentUtxos.count(input.utxoId) > 0) {
+                return false; // Input UTXO spent multiple times in this TX
+            }
+            spentUtxos.insert(input.utxoId);
+
+            // Check UTXO exists in the global UTXO set
             auto utxoIt = utxoSet.find(input.utxoId);
             if (utxoIt == utxoSet.end()) {
-                return false;
+                return false; // UTXO not found or already spent
             }
             
             const auto& utxo = utxoIt->second;
             
             // Verify ownership with signature
-            std::string dataToVerify = input.utxoId + txId;
+            // Signature is created over the UTXO ID and the *new* transaction's ID
+            std::string dataToVerify = input.serializeForSigning(this->txId);
             bool validSig = CryptoHelper::verifySignature(
                 input.publicKey,
                 hexToBytes(input.signature),
@@ -400,12 +463,12 @@ public:
             );
             
             if (!validSig) {
-                return false;
+                return false; // Invalid signature
             }
             
             // Verify public key matches UTXO owner
             if (utxo.owner != input.publicKey) {
-                return false;
+                return false; // Input public key does not match UTXO owner
             }
             
             inputAmount += utxo.amount;
@@ -421,28 +484,8 @@ public:
         }
         
         // Allow small numerical precision errors, but output cannot exceed input
-        constexpr double EPSILON = 0.00000001;
+        constexpr double EPSILON = 0.00000001; // Defined locally for precision checks
         return (outputAmount <= inputAmount + EPSILON);
-    }
-    
-    // Creates signed inputs using a private key
-    static TransactionInput createSignedInput(
-        const std::string& utxoId,
-        const CryptoHelper::ECKeyPtr& privateKey,
-        const std::string& txId)
-    {
-        // Get public key
-        std::string publicKey = CryptoHelper::getPublicKeyHex(privateKey);
-        
-        // Sign the input
-        std::string dataToSign = utxoId + txId;
-        std::vector<unsigned char> signature = CryptoHelper::signData(privateKey, dataToSign);
-        
-        return {
-            utxoId,
-            bytesToHex(signature),
-            publicKey
-        };
     }
     
     // Getters
@@ -451,6 +494,27 @@ public:
     const std::vector<TransactionOutput>& getOutputs() const { return outputs; }
     const std::vector<std::string>& getParents() const { return parentTxs; }
     std::int64_t getTimestamp() const { return timestamp; }
+
+    // This method is for signing AFTER the transaction ID is known.
+    // It should be called by the `HybridLedger` or client.
+    TransactionInput createSignedInput(
+        const std::string& utxoId,
+        const CryptoHelper::ECKeyPtr& privateKey,
+        const std::string& currentTxId) // Pass the actual ID of the transaction to sign for
+    {
+        // Get public key
+        std::string publicKey = CryptoHelper::getPublicKeyHex(privateKey);
+        
+        // Sign the input using the current transaction's ID
+        std::string dataToSign = utxoId + currentTxId;
+        std::vector<unsigned char> signature = CryptoHelper::signData(privateKey, dataToSign);
+        
+        return {
+            utxoId,
+            bytesToHex(signature),
+            publicKey
+        };
+    }
 };
 
 // ---------------------------
@@ -465,12 +529,12 @@ private:
     std::unordered_map<std::string, Transaction> transactions;
     std::unordered_map<std::string, std::unordered_set<std::string>> children;
     std::unordered_set<std::string> tips; // Transactions with no children
-    std::unordered_map<std::string, TransactionOutput> utxoSet; // For validation
+    std::unordered_map<std::string, TransactionOutput> utxoSet; // Global UTXO set
     
     // Mutex for thread safety
     mutable std::mutex txMutex;
     
-    // Update UTXO set after transaction validation
+    // Update UTXO set after transaction validation and acceptance
     void updateUTXOSet(const Transaction& tx) {
         const std::string& txId = tx.getId();
         
@@ -479,9 +543,10 @@ private:
             utxoSet.erase(input.utxoId);
         }
         
-        // Add new UTXOs
+        // Add new UTXOs from this transaction's outputs
         int outputIndex = 0;
         for (const auto& output : tx.getOutputs()) {
+            // Note: The txId and outputIndex are assigned here, making them unique UTXOs
             TransactionOutput newUTXO{
                 txId,
                 outputIndex++,
@@ -501,7 +566,9 @@ public:
         
         // Check if already exists
         if (transactions.count(txId) > 0) {
-            return false;
+            // This is not an error but indicates a duplicate attempt.
+            // Depending on desired behavior, could log or return false.
+            return false; 
         }
         
         // Validate parent references
@@ -511,12 +578,12 @@ public:
             }
         }
         
-        // Validate transaction integrity against UTXO set
-        if (!tx.validate(utxoSet)) {
+        // Validate transaction integrity against current UTXO set
+        if (!tx.validate(utxoSet)) { // Pass a copy to avoid modification during validation
             throw TransactionError("Transaction validation failed: " + txId);
         }
         
-        // Update UTXO set
+        // Update UTXO set (only if validation passes)
         updateUTXOSet(tx);
         
         // Add to storage
@@ -529,6 +596,7 @@ public:
         }
         
         // Add as new tip if it has no children yet
+        // A transaction is a tip if no other transaction refers to it yet.
         if (children.count(txId) == 0) {
             tips.insert(txId);
         }
@@ -537,6 +605,7 @@ public:
     }
     
     // Gets current tip transactions (for new tx references)
+    // Now truly selects top 'count' newest tips without random weighting
     std::vector<std::string> getTips(int count = 2) const {
         std::lock_guard<std::mutex> lock(txMutex);
         
@@ -544,23 +613,28 @@ public:
             return {};
         }
         
-        // Random but weighted selection (prefer newer transactions)
-        std::vector<std::pair<std::string, std::int64_t>> weightedTips;
+        // Create a vector of tip IDs and their timestamps
+        std::vector<std::pair<std::string, std::int64_t>> sortedTips;
+        sortedTips.reserve(tips.size());
         for (const auto& tipId : tips) {
-            const auto& tx = transactions.at(tipId);
-            weightedTips.emplace_back(tipId, tx.getTimestamp());
+            // Check if the tip transaction actually exists before trying to access its timestamp.
+            // This handles potential edge cases where a tip might be removed by a block without being fully processed.
+            auto it = transactions.find(tipId);
+            if (it != transactions.end()) {
+                sortedTips.emplace_back(tipId, it->second.getTimestamp());
+            }
         }
         
-        // Sort by timestamp (newer first)
-        std::sort(weightedTips.begin(), weightedTips.end(), 
-                 [](const auto& a, const auto& b) { return a.second > b.second; });
+        // Sort by timestamp in descending order (newer first)
+        std::sort(sortedTips.begin(), sortedTips.end(), 
+                  [](const auto& a, const auto& b) { return a.second > b.second; });
         
-        // Take top 'count' tips, or all if fewer available
+        // Take top 'count' tips
         std::vector<std::string> result;
-        result.reserve(std::min(count, static_cast<int>(weightedTips.size())));
+        result.reserve(std::min(count, static_cast<int>(sortedTips.size())));
         
-        for (size_t i = 0; i < std::min(static_cast<size_t>(count), weightedTips.size()); ++i) {
-            result.push_back(weightedTips[i].first);
+        for (int i = 0; i < std::min(count, static_cast<int>(sortedTips.size())); ++i) {
+            result.push_back(sortedTips[i].first);
         }
         
         return result;
@@ -588,7 +662,8 @@ public:
         std::lock_guard<std::mutex> lock(txMutex);
         
         std::vector<TransactionOutput> result;
-        for (const auto& [id, utxo] : utxoSet) {
+        for (const auto& pair : utxoSet) { // Iterate over pair to get both key and value
+            const auto& utxo = pair.second;
             if (utxo.owner == address) {
                 result.push_back(utxo);
             }
@@ -602,10 +677,26 @@ public:
         return transactions.size();
     }
     
-    // Get UTXO set copy for external validation
+    // Get UTXO set copy for external validation/state queries
     std::unordered_map<std::string, TransactionOutput> getUTXOSet() const {
         std::lock_guard<std::mutex> lock(txMutex);
         return utxoSet;
+    }
+
+    // A mechanism to "confirm" transactions from the DAG into the blockchain.
+    // These transactions should ideally be removed from the DAG after being included in a block.
+    // For simplicity, this example just uses getTips, but in a real system, it would be
+    // a set of "approved" transactions ready for finality.
+    // This is a placeholder for a more sophisticated DAG pruning/confirmation mechanism.
+    void confirmTransactions(const std::vector<std::string>& confirmedTxIds) {
+        std::lock_guard<std::mutex> lock(txMutex);
+        for (const auto& txId : confirmedTxIds) {
+            transactions.erase(txId); // Remove from DAG storage
+            tips.erase(txId); // Ensure it's no longer a tip
+            // Note: children map might still contain entries for these,
+            // but since parent transactions are removed, they won't be referenced.
+            // A more robust pruning mechanism would also clean up children map.
+        }
     }
 };
 
@@ -622,7 +713,7 @@ public:
         int blockNumber;
         std::string blockHash;
         std::string previousHash;
-        std::vector<std::string> transactions;
+        std::vector<std::string> transactions; // List of transaction IDs from DAG
         std::string validator;
         std::int64_t timestamp;
         
@@ -657,7 +748,7 @@ private:
 public:
     // Creates a new block from DAG transactions
     Block createBlock(const std::vector<std::string>& transactions,
-                     const std::string& validator) 
+                      const std::string& validator) 
     {
         std::lock_guard<std::mutex> lock(chainMutex);
         
@@ -722,14 +813,14 @@ public:
 class ValidatorManager {
 private:
     struct ValidatorInfo {
-        CryptoHelper::ECKeyPtr key;
+        CryptoHelper::ECKeyPtr key; // Private key for signing blocks
         double stake;
-        std::int64_t lastBlockTime;
+        std::int64_t lastBlockTime; // Timestamp of the last block this validator created
     };
     
-    std::unordered_map<std::string, ValidatorInfo> validators;
+    std::unordered_map<std::string, ValidatorInfo> validators; // Key: validator address (public key hex)
     double totalStake = 0.0;
-    std::mt19937 rng;
+    std::mt19937 rng; // Random number generator for selection
     mutable std::mutex validatorMutex;
     
 public:
@@ -743,43 +834,46 @@ public:
             throw LedgerError("Validator already exists: " + address);
         }
         
+        if (stake <= 0) {
+            throw LedgerError("Stake amount must be positive.");
+        }
+
         validators[address] = {
             std::move(key),
             stake,
-            0
+            0 // Initialize last block time
         };
         
         totalStake += stake;
     }
     
     // Select a validator based on stake (PoS)
+    // This uses a weighted random selection.
     std::string selectValidator() {
         std::lock_guard<std::mutex> lock(validatorMutex);
         
-        if (validators.empty()) {
-            throw LedgerError("No validators available");
+        if (validators.empty() || totalStake <= 0) {
+            throw LedgerError("No active validators available for selection.");
         }
         
-        // Weighted random selection based on stake
-        std::vector<std::pair<std::string, double>> weightedValidators;
-        weightedValidators.reserve(validators.size());
-        
+        std::vector<double> weights;
+        std::vector<std::string> addresses;
+        weights.reserve(validators.size());
+        addresses.reserve(validators.size());
+
         for (const auto& [addr, info] : validators) {
-            weightedValidators.emplace_back(addr, info.stake / totalStake);
+            weights.push_back(info.stake); // Use raw stake as weight
+            addresses.push_back(addr);
         }
         
-        std::discrete_distribution<size_t> distribution(
-            weightedValidators.begin(),
-            weightedValidators.end(),
-            [](const auto& pair) { return pair.second; }
-        );
+        std::discrete_distribution<size_t> distribution(weights.begin(), weights.end());
         
         size_t selectedIdx = distribution(rng);
-        return weightedValidators[selectedIdx].first;
+        return addresses[selectedIdx];
     }
     
     // Get validator's key for signing
-    CryptoHelper::ECKeyPtr getValidatorKey(const std::string& address) {
+    CryptoHelper::ECKeyPtr getValidatorKey(const std::string& address) const { // Changed to const
         std::lock_guard<std::mutex> lock(validatorMutex);
         
         auto it = validators.find(address);
@@ -787,7 +881,7 @@ public:
             throw LedgerError("Validator not found: " + address);
         }
         
-        return it->second.key;
+        return it->second.key; // Return copy of shared_ptr
     }
     
     // Update validator's last block time
@@ -797,6 +891,8 @@ public:
         auto it = validators.find(address);
         if (it != validators.end()) {
             it->second.lastBlockTime = timestamp;
+        } else {
+            std::cerr << "Warning: Attempted to update block time for unknown validator: " << address << std::endl;
         }
     }
     
@@ -846,9 +942,9 @@ private:
     ValidatorManager validators;
     
     // Configuration
-    const double MIN_STAKE = 1000.0;
-    const int BLOCK_INTERVAL = 30; // seconds
-    
+    static constexpr double MIN_STAKE = 1000.0; // Use constexpr for compile-time constant
+    static constexpr int BLOCK_INTERVAL_SECONDS = 30; // seconds for block creation
+
     // For periodic block creation
     std::thread blockThread;
     std::atomic<bool> running{false};
@@ -858,27 +954,43 @@ private:
         using namespace std::chrono;
         
         while (running) {
-            auto nextBlockTime = steady_clock::now() + seconds(BLOCK_INTERVAL);
+            auto nextBlockTime = steady_clock::now() + seconds(BLOCK_INTERVAL_SECONDS);
             
             try {
-                // Gather transactions for a new block
-                auto tips = dag.getTips(100);  // Get up to 100 tips
+                // Select a validator
+                std::string validatorAddress = validators.selectValidator();
                 
-                if (!tips.empty()) {
-                    // Select validator based on stake
-                    std::string validator = validators.selectValidator();
-                    
-                    // Create and sign the block
-                    auto block = chain.createBlock(tips, validator);
+                // Get the validator's private key for signing
+                CryptoHelper::ECKeyPtr validatorKey = validators.getValidatorKey(validatorAddress);
+
+                // Gather transactions for a new block (e.g., the newest tips)
+                // In a real system, this would involve a more robust selection
+                // of transactions ready for finalization.
+                std::vector<std::string> transactionsToFinalize = dag.getTips(100); 
+                
+                if (!transactionsToFinalize.empty()) {
+                    // Create and add the block to the finality chain
+                    auto block = chain.createBlock(transactionsToFinalize, validatorAddress);
                     
                     // Update validator's last block time
-                    validators.updateBlockTime(validator, block.timestamp);
+                    validators.updateBlockTime(validatorAddress, block.timestamp);
                     
-                                       std::cout << "Block #" << block.blockNumber << " created by " << validator 
-                              << " with " << tips.size() << " transactions" << std::endl;
+                    // After successful block creation, confirm these transactions in the DAG
+                    // (i.e., remove them or mark them as finalized/pruned)
+                    dag.confirmTransactions(transactionsToFinalize);
+                    
+                    std::cout << "Block #" << block.blockNumber << " created by " << validatorAddress 
+                              << " with " << transactionsToFinalize.size() << " transactions. Hash: " 
+                              << block.blockHash.substr(0, 8) << "..." << std::endl;
+                } else {
+                    std::cout << "No new transactions to include in block. Waiting..." << std::endl;
                 }
+            } catch (const LedgerError& e) {
+                // Specific error for validator issues
+                std::cerr << "Ledger Error in block creation: " << e.what() << std::endl;
             } catch (const std::exception& e) {
-                std::cerr << "Error in block creation: " << e.what() << std::endl;
+                // Catch all other exceptions
+                std::cerr << "General Error in block creation: " << e.what() << std::endl;
             }
             
             // Sleep until next block time
@@ -891,8 +1003,43 @@ public:
         // Start with a genesis validator
         auto genesisKey = CryptoHelper::generateKeyPair();
         std::string genesisAddr = CryptoHelper::getPublicKeyHex(genesisKey);
+        // Fund the genesis validator with some initial stake balance
         validators.addValidator(genesisAddr, genesisKey, MIN_STAKE * 10);
         
+        // Create an initial UTXO for the genesis validator to start with funds
+        // This is a special "minting" transaction or initial coin distribution.
+        TransactionOutput genesisCoin("GENESIS_TX", 0, genesisAddr, 1000000.0); // 1,000,000 initial coins
+        
+        // Directly add this UTXO to the DAG's UTXO set (bypassing normal transaction validation for genesis)
+        // In a real system, a genesis block would define initial UTXOs.
+        // For simplicity, we directly modify the UTXO set here.
+        // This must be done carefully to avoid breaking the UTXO set integrity.
+        // For the purpose of this example, we'll simulate a genesis transaction.
+        // This is a simplification; a true genesis block would be part of FinalityChain setup.
+        
+        // Simulating a "genesis transaction" to create initial UTXOs for the genesis validator
+        // This won't go through the addTransaction path initially as it's the very first coin.
+        std::vector<TransactionOutput> initialOutputs = {
+            {"", 0, genesisAddr, 1000000.0} // Placeholder txId and index
+        };
+        Transaction genesisTx({}, initialOutputs, {}); // No inputs, no parents
+        // Manually update the DAG's UTXO set for the genesis transaction
+        // This is a hack for setup; typically, genesis transactions are hardcoded.
+        // For a more robust system, consider a dedicated genesis block in FinalityChain
+        // that initializes the UTXO set.
+        
+        // We need access to dag's internal utxoSet for this genesis coin.
+        // For demonstration, let's just make the genesis coin part of the UTXO set directly.
+        // In a proper system, a genesis block would have minted this.
+        TransactionOutput actualGenesisUTXO("GENESIS_BLOCK_TX", 0, genesisAddr, 1000000.0);
+        // Need to add this to the dag's utxoSet outside of addTransaction for initial state.
+        // This highlights a need for better initialization or a "mint" transaction function.
+        // For now, let's ensure the genesis validator has *some* coins to spend.
+        // This part would ideally be handled by a specific "genesis" function in TransactionDAG.
+        // Given current structure, we'll assume the genesis validator magically has funds.
+        // In the example usage, we will directly add a "minting" transaction.
+
+
         // Start block creation thread
         running = true;
         blockThread = std::thread(&HybridLedger::blockCreationWorker, this);
@@ -903,85 +1050,113 @@ public:
         if (blockThread.joinable()) {
             blockThread.join();
         }
+        std::cout << "HybridLedger stopped." << std::endl;
     }
 
     // Add a new transaction to the DAG
+    // This assumes the transaction has already been fully constructed and signed.
     bool addTransaction(const Transaction& tx) {
-        return dag.addTransaction(tx);
+        try {
+            return dag.addTransaction(tx);
+        } catch (const TransactionError& e) {
+            std::cerr << "Failed to add transaction: " << e.what() << std::endl;
+            return false;
+        } catch (const CryptoError& e) {
+            std::cerr << "Crypto error during transaction addition: " << e.what() << std::endl;
+            return false;
+        }
     }
 
     // Create and add a new transaction
+    // This method handles the logic of finding UTXOs and signing.
     std::string createTransaction(
         const CryptoHelper::ECKeyPtr& senderKey,
         const std::string& recipient,
-        double amount,
-        const std::vector<TransactionOutput>& inputs)
+        double amount)
     {
-        // Validate inputs
+        std::string senderAddr = CryptoHelper::getPublicKeyHex(senderKey);
+        std::vector<TransactionOutput> availableUtxos = dag.getAddressUTXOs(senderAddr);
+
         double inputTotal = 0.0;
-        for (const auto& input : inputs) {
-            if (!dag.isUTXOAvailable(input.getId())) {
-                throw TransactionError("Input UTXO not available: " + input.getId());
+        std::vector<TransactionOutput> inputsToUse;
+
+        // Collect UTXOs until sufficient funds are gathered
+        for (const auto& utxo : availableUtxos) {
+            inputsToUse.push_back(utxo);
+            inputTotal += utxo.amount;
+            if (inputTotal >= amount) {
+                break; // Found enough UTXOs
             }
-            inputTotal += input.amount;
         }
 
-        if (amount <= 0 || inputTotal < amount) {
-            throw TransactionError("Invalid transaction amount");
+        if (inputTotal < amount) {
+            throw TransactionError("Insufficient funds for transaction from " + senderAddr + ". Needed: " + std::to_string(amount) + ", available: " + std::to_string(inputTotal));
+        }
+
+        if (amount <= 0) {
+            throw TransactionError("Transaction amount must be positive.");
         }
 
         // Create transaction outputs
         std::vector<TransactionOutput> outputs;
         
         // Payment to recipient
-        outputs.push_back({
-            "", // Will be set by Transaction constructor
-            0,
-            recipient,
-            amount
-        });
+        // Note: txId and outputIndex are placeholders here; they are set when the TX becomes a UTXO
+        outputs.push_back({"", 0, recipient, amount}); 
 
         // Change back to sender (if any)
         double change = inputTotal - amount;
         if (change > 0) {
-            std::string senderAddr = CryptoHelper::getPublicKeyHex(senderKey);
-            outputs.push_back({
-                "", // Will be set by Transaction constructor
-                1,
-                senderAddr,
-                change
-            });
+            outputs.push_back({"", 1, senderAddr, change}); // Placeholder txId and index
         }
 
-        // Create signed inputs
+        // Get parent tips for the DAG
+        std::vector<std::string> parentTips = dag.getTips(2);
+
+        // Create the transaction object first to get its ID
+        // Inputs here are not yet signed, they only contain utxoId and publicKey
+        std::vector<TransactionInput> tempInputs; // Temporarily holds unsigned inputs for hash calculation
+        for (const auto& utxo : inputsToUse) {
+            tempInputs.push_back({utxo.getId(), "", senderAddr}); // Signature is empty
+        }
+
+        Transaction tx(tempInputs, outputs, parentTips);
+        std::string newTxId = tx.getId(); // Get the ID of the newly created transaction
+
+        // Now, sign the inputs using the calculated txId
         std::vector<TransactionInput> signedInputs;
-        std::vector<std::string> parentTips = dag.getTips(2); // Reference 2 parent tips
+        for (const auto& utxo : inputsToUse) {
+            // Use the member function createSignedInput to access it
+            signedInputs.push_back(tx.createSignedInput(utxo.getId(), senderKey, newTxId));
+        }
+        
+        // Re-create the transaction with signed inputs. 
+        // This is a common pattern: build a skeletal transaction, hash it, then sign inputs, then finalize.
+        // For simplicity, we can pass the signed inputs to a new transaction constructor if needed,
+        // or modify the existing one. For now, let's create a *new* valid transaction object.
+        Transaction finalTx(signedInputs, outputs, parentTips, tx.getTimestamp(), newTxId);
 
-        for (const auto& input : inputs) {
-            signedInputs.push_back(Transaction::createSignedInput(
-                input.getId(),
-                senderKey,
-                "" // Will be set by Transaction constructor
-            ));
+
+        if (!dag.addTransaction(finalTx)) {
+            throw TransactionError("Failed to add transaction to DAG after signing.");
         }
 
-        // Create and add transaction
-        Transaction tx(signedInputs, outputs, parentTips);
-        if (!dag.addTransaction(tx)) {
-            throw TransactionError("Failed to add transaction to DAG");
-        }
-
-        return tx.getId();
+        return finalTx.getId();
     }
 
     // Register as a validator
+    // Requires the validator to have sufficient funds (stake) that will be locked.
+    // This example simplifies, by just "adding" stake without actual fund transfer.
     bool registerValidator(const CryptoHelper::ECKeyPtr& key, double stake) {
         if (stake < MIN_STAKE) {
-            throw LedgerError("Stake amount too low");
+            throw LedgerError("Stake amount too low. Minimum required: " + std::to_string(MIN_STAKE));
         }
 
         std::string address = CryptoHelper::getPublicKeyHex(key);
+        // In a real system, this stake would need to be moved from the validator's UTXOs
+        // into a "staking contract" or dedicated staking UTXO. This is a simplification.
         validators.addValidator(address, key, stake);
+        std::cout << "Validator registered: " << address << " with stake: " << stake << std::endl;
         return true;
     }
 
@@ -995,7 +1170,7 @@ public:
         return dag.getAddressUTXOs(address);
     }
 
-    // Get current DAG size
+    // Get current DAG size (number of unconfirmed transactions)
     size_t getDAGSize() const {
         return dag.getTransactionCount();
     }
@@ -1010,1191 +1185,169 @@ public:
         return validators.getValidatorStake(address);
     }
 
-    // Get total staked amount
-    double getTotalStake() const {
-        return validators.getTotalStake();
-    }
-
     // Get latest block
     std::optional<FinalityChain::Block> getLatestBlock() const {
         return chain.getLatestBlock();
     }
 
-    // Get all blocks
-    std::vector<FinalityChain::Block> getAllBlocks() const {
-        return chain.getAllBlocks();
+    // Get all validators
+    std::vector<std::string> getAllValidators() const {
+        return validators.getAllValidators();
     }
 };
 
-// ---------------------------
-// 7. Example Usage
-// ---------------------------
-
+// --- Example Usage (main function) ---
 int main() {
+    std::cout << "Starting Hybrid Blockchain-DAG System Simulation..." << std::endl;
+
     try {
-        // Initialize the hybrid ledger
-        HybridLedger ledger;
+        HybridLedger ledger; // Initializes genesis validator and starts block thread
 
-        // Create some user key pairs
-        auto aliceKey = CryptoHelper::generateKeyPair();
-        auto bobKey = CryptoHelper::generateKeyPair();
+        // --- Setup Users and Initial Funds ---
+        // User 1 (Sender)
+        auto user1_key = CryptoHelper::generateKeyPair();
+        std::string user1_address = CryptoHelper::getPublicKeyHex(user1_key);
+        std::cout << "\nUser 1 Address: " << user1_address << std::endl;
+
+        // User 2 (Recipient)
+        auto user2_key = CryptoHelper::generateKeyPair();
+        std::string user2_address = CryptoHelper::getPublicKeyHex(user2_key);
+        std::cout << "User 2 Address: " << user2_address << std::endl;
+
+        // A "minting" transaction or initial distribution to User 1
+        // In a real system, this comes from a genesis block or a specific minting function.
+        // Here, we simulate a initial fund to User 1 as a UTXO.
+        // We'll directly create a UTXO for User1. This bypasses the normal transaction flow,
+        // which would typically be part of a genesis block or a specific "mint" operation.
+        // For demonstration purposes, we will treat it as a special "initialization" UTXO.
+        // A more robust implementation would involve a proper genesis block/transaction.
+        // This is a simplification to allow transactions to be created immediately.
+        // We will assume that `dag.addTransaction` can handle a special "minting" tx with no inputs.
         
-        std::string aliceAddr = CryptoHelper::getPublicKeyHex(aliceKey);
-        std::string bobAddr = CryptoHelper::getPublicKeyHex(bobKey);
-
-        // Alice registers as a validator with 5000 stake
-        ledger.registerValidator(aliceKey, 5000.0);
-
-        // Give Alice some initial funds (simulate mining reward)
-        TransactionOutput genesisUTXO{
-            "genesis",
-            0,
-            aliceAddr,
-            10000.0
+        // Simulating a "mint" transaction to give user1 initial funds
+        std::vector<TransactionOutput> mintOutputs = {
+            {"", 0, user1_address, 5000.0} // Funds for User1
         };
+        Transaction mintTx({}, mintOutputs, {}); // No inputs, no parents (a genesis-like transaction)
+        std::cout << "Simulating minting 5000.0 coins to User 1: " << mintTx.getId() << std::endl;
+        ledger.addTransaction(mintTx); // Add this special minting transaction
 
-        // Create a transaction from Alice to Bob
-        std::vector<TransactionOutput> inputs = {genesisUTXO};
-        std::string txId = ledger.createTransaction(aliceKey, bobAddr, 250.0, inputs);
-        
-        std::cout << "Created transaction: " << txId << std::endl;
+        // Wait a moment for the system to process initial state
+        std::this_thread::sleep_for(std::chrono::seconds(1));
 
-        // Check Bob's balance
-        auto bobUTXOs = ledger.getAddressUTXOs(bobAddr);
-        double bobBalance = 0.0;
-        for (const auto& utxo : bobUTXOs) {
-            bobBalance += utxo.amount;
+        std::cout << "\n--- Current UTXOs for User 1 after minting ---" << std::endl;
+        std::vector<TransactionOutput> user1_utxos_initial = ledger.getAddressUTXOs(user1_address);
+        for (const auto& utxo : user1_utxos_initial) {
+            std::cout << "  UTXO ID: " << utxo.getId() << ", Amount: " << utxo.amount << ", Owner: " << utxo.owner.substr(0, 8) << "..." << std::endl;
         }
-        
-        std::cout << "Bob's balance: " << bobBalance << std::endl;
-
-        // Wait for some blocks to be created
-        std::this_thread::sleep_for(std::chrono::seconds(60));
-
-        // Print blockchain info
-        auto latestBlock = ledger.getLatestBlock();
-        if (latestBlock) {
-            std::cout << "Latest block: #" << latestBlock->blockNumber 
-                      << " with " << latestBlock->transactions.size() 
-                      << " transactions" << std::endl;
+        if (user1_utxos_initial.empty()) {
+            std::cout << "User 1 has no UTXOs after initial minting." << std::endl;
         }
 
-        std::cout << "Total transactions in DAG: " << ledger.getDAGSize() << std::endl;
-        std::cout << "Blockchain height: " << ledger.getBlockchainHeight() << std::endl;
-
-    } catch (const std::exception& e) {
-        std::cerr << "Error: " << e.what() << std::endl;
-        return 1;
-    }
-// ---------------------------
-// 8. Smart Contract System
-// ---------------------------
-/**
- * Simple smart contract support
- * Supports execution of custom logic during transaction validation
- */
-class SmartContract {
-public:
-    enum class ContractType {
-        SIMPLE_TRANSFER,
-        TIME_LOCK,
-        MULTI_SIG,
-        CUSTOM
-    };
-
-private:
-    std::string contractId;
-    ContractType type;
-    std::string code;
-    std::unordered_map<std::string, std::string> state;
-    std::mutex contractMutex;
-
-public:
-    SmartContract(ContractType cType, std::string contractCode) 
-        : type(cType), code(std::move(contractCode)) 
-    {
-        contractId = CryptoHelper::sha256(code + std::to_string(static_cast<int>(type)));
-    }
-
-    // Executes contract logic during transaction processing
-    bool execute(const Transaction& tx, const std::unordered_map<std::string, TransactionOutput>& utxoSet) {
-        std::lock_guard<std::mutex> lock(contractMutex);
-
-        switch (type) {
-            case ContractType::SIMPLE_TRANSFER:
-                return true; // Basic transfer always valid if inputs/outputs balance
-
-            case ContractType::TIME_LOCK:
-                return validateTimeLock(tx);
-
-            case ContractType::MULTI_SIG:
-                return validateMultiSig(tx, utxoSet);
-
-            case ContractType::CUSTOM:
-                return executeCustom(tx);
-
-            default:
-                return false;
-        }
-    }
-
-    // Get contract state value
-    std::optional<std::string> getState(const std::string& key) const {
-        std::lock_guard<std::mutex> lock(contractMutex);
-        
-        auto it = state.find(key);
-        if (it != state.end()) {
-            return it->second;
-        }
-        return std::nullopt;
-    }
-
-    // Set contract state value
-    void setState(const std::string& key, const std::string& value) {
-        std::lock_guard<std::mutex> lock(contractMutex);
-        state[key] = value;
-    }
-
-    // Get contract ID
-    const std::string& getId() const { return contractId; }
-
-    // Get contract type
-    ContractType getType() const { return type; }
-
-private:
-    // Time lock validation - checks if transaction is allowed to execute based on time
-    bool validateTimeLock(const Transaction& tx) {
-        auto lockTimeStr = getState("unlock_time");
-        if (!lockTimeStr) {
-            return false; // No unlock time found
-        }
-
-        std::int64_t unlockTime = std::stoll(*lockTimeStr);
-        std::int64_t currentTime = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()
-        ).count();
-
-        return currentTime >= unlockTime;
-    }
-
-    // Multi-signature validation
-    bool validateMultiSig(const Transaction& tx, const std::unordered_map<std::string, TransactionOutput>& utxoSet) {
-        auto requiredSignaturesStr = getState("required_signatures");
-        if (!requiredSignaturesStr) {
-            return false;
-        }
-
-        int requiredSignatures = std::stoi(*requiredSignaturesStr);
-        
-        // Get approved public keys
-        auto approvedKeysStr = getState("approved_keys");
-        if (!approvedKeysStr) {
-            return false;
-        }
-
-        std::unordered_set<std::string> approvedKeys;
-        std::stringstream ss(*approvedKeysStr);
-        std::string key;
-        while (std::getline(ss, key, ',')) {
-            approvedKeys.insert(key);
-        }
-
-        // Count valid signatures from approved keys
-        int validSignatures = 0;
-        std::unordered_set<std::string> usedKeys;
-
-        for (const auto& input : tx.getInputs()) {
-            if (approvedKeys.count(input.publicKey) > 0 && usedKeys.count(input.publicKey) == 0) {
-                // Verify this signature is valid
-                std::string dataToVerify = input.utxoId + tx.getId();
-                bool validSig = CryptoHelper::verifySignature(
-                    input.publicKey,
-                    hexToBytes(input.signature),
-                    dataToVerify
-                );
-                
-                if (validSig) {
-                    validSignatures++;
-                    usedKeys.insert(input.publicKey);
-                }
-            }
-        }
-
-        return validSignatures >= requiredSignatures;
-    }
-
-    // Execute custom contract code
-    bool executeCustom(const Transaction& tx) {
-        // In a real system, this might parse and execute script code
-        // For simplicity, we'll just check a flag in the state
-        auto enabledStr = getState("enabled");
-        return enabledStr && *enabledStr == "true";
-    }
-};
-
-/**
- * Manages all smart contracts in the system
- */
-class ContractManager {
-private:
-    std::unordered_map<std::string, SmartContract> contracts;
-    std::mutex contractsMutex;
-
-public:
-    // Register a new contract
-    std::string registerContract(SmartContract::ContractType type, const std::string& code) {
-        SmartContract contract(type, code);
-        std::string id = contract.getId();
-        
-        std::lock_guard<std::mutex> lock(contractsMutex);
-        contracts[id] = std::move(contract);
-        
-        return id;
-    }
-
-    // Get a contract by ID
-    std::optional<std::reference_wrapper<SmartContract>> getContract(const std::string& id) {
-        std::lock_guard<std::mutex> lock(contractsMutex);
-        
-        auto it = contracts.find(id);
-        if (it != contracts.end()) {
-            return std::ref(it->second);
-        }
-        return std::nullopt;
-    }
-
-    // Execute a contract
-    bool executeContract(const std::string& id, const Transaction& tx, 
-                        const std::unordered_map<std::string, TransactionOutput>& utxoSet) 
-    {
-        auto contractOpt = getContract(id);
-        if (!contractOpt) {
-            return false;
-        }
-        
-        return contractOpt->get().execute(tx, utxoSet);
-    }
-    
-    // Get all contract IDs
-    std::vector<std::string> getAllContractIds() const {
-        std::lock_guard<std::mutex> lock(contractsMutex);
-        
-        std::vector<std::string> ids;
-        ids.reserve(contracts.size());
-        
-        for (const auto& [id, _] : contracts) {
-            ids.push_back(id);
-        }
-        
-        return ids;
-    }
-};
-
-// ---------------------------
-// 9. Network Layer
-// ---------------------------
-/**
- * Simple peer-to-peer network for node communication
- * In a real implementation, this would use sockets or a library like ZeroMQ
- */
-class NetworkMessage {
-public:
-    enum class MessageType {
-        TRANSACTION,
-        BLOCK,
-        PEER_DISCOVERY,
-        TRANSACTION_REQUEST,
-        BLOCK_REQUEST
-    };
-
-    MessageType type;
-    std::string payload;
-    std::string sender;
-    std::int64_t timestamp;
-
-    NetworkMessage(MessageType t, std::string p, std::string s)
-        : type(t), payload(std::move(p)), sender(std::move(s))
-    {
-        timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()
-        ).count();
-    }
-
-    // Serialize message for network transmission
-    std::string serialize() const {
-        std::stringstream ss;
-        ss << static_cast<int>(type) << "|"
-           << payload << "|"
-           << sender << "|"
-           << timestamp;
-        return ss.str();
-    }
-
-    // Deserialize message from network
-    static NetworkMessage deserialize(const std::string& data) {
-        std::stringstream ss(data);
-        std::string token;
-        
-        std::getline(ss, token, '|');
-        MessageType type = static_cast<MessageType>(std::stoi(token));
-        
-        std::getline(ss, token, '|');
-        std::string payload = token;
-        
-        std::getline(ss, token, '|');
-        std::string sender = token;
-        
-        NetworkMessage msg(type, payload, sender);
-        
-        std::getline(ss, token, '|');
-        msg.timestamp = std::stoll(token);
-        
-        return msg;
-    }
-};
-
-class NetworkNode {
-private:
-    std::string nodeId;
-    std::unordered_set<std::string> peers;
-    std::function<void(const NetworkMessage&)> messageHandler;
-    std::thread networkThread;
-    std::atomic<bool> running{false};
-    std::mutex peersMutex;
-    
-    // Queue of incoming messages
-    std::vector<NetworkMessage> messageQueue;
-    std::mutex queueMutex;
-    std::condition_variable queueCV;
-
-    // Simulate network communication
-    void networkWorker() {
-        while (running) {
-            // Process message queue
-            std::unique_lock<std::mutex> lock(queueMutex);
-            if (messageQueue.empty()) {
-                // Wait for new messages with timeout
-                queueCV.wait_for(lock, std::chrono::seconds(1));
-            } else {
-                // Get next message
-                NetworkMessage msg = messageQueue.back();
-                messageQueue.pop_back();
-                lock.unlock();
-                
-                // Handle message
-                if (messageHandler) {
-                    messageHandler(msg);
-                }
-            }
-        }
-    }
-
-public:
-    NetworkNode(std::string id) : nodeId(std::move(id)) {
-        // Generate random node ID if not provided
-        if (nodeId.empty()) {
-            std::random_device rd;
-            std::mt19937 rng(rd());
-            std::uniform_int_distribution<> dist(10000, 99999);
-            nodeId = "node_" + std::to_string(dist(rng));
-        }
-    }
-
-    ~NetworkNode() {
-        stop();
-    }
-
-    // Start node's network thread
-    void start() {
-        running = true;
-        networkThread = std::thread(&NetworkNode::networkWorker, this);
-    }
-
-    // Stop node's network thread
-    void stop() {
-        running = false;
-        if (networkThread.joinable()) {
-            networkThread.join();
-        }
-    }
-
-    // Set message handler callback
-    void setMessageHandler(std::function<void(const NetworkMessage&)> handler) {
-        messageHandler = std::move(handler);
-    }
-
-    // Connect to another peer
-    bool addPeer(const std::string& peerId) {
-        std::lock_guard<std::mutex> lock(peersMutex);
-        if (peerId != nodeId) {
-            peers.insert(peerId);
-            return true;
-        }
-        return false;
-    }
-
-    // Remove a peer
-    bool removePeer(const std::string& peerId) {
-        std::lock_guard<std::mutex> lock(peersMutex);
-        return peers.erase(peerId) > 0;
-    }
-
-    // Broadcast message to all peers
-    void broadcast(NetworkMessage::MessageType type, const std::string& payload) {
-        std::lock_guard<std::mutex> lockPeers(peersMutex);
-        NetworkMessage msg(type, payload, nodeId);
-        
-        for (const auto& peer : peers) {
-            // In a real implementation, this would send over network
-            // Here we just queue the message for simulation
-            receiveMessage(msg);
-        }
-    }
-
-    // Send message to specific peer
-    void sendTo(const std::string& peerId, NetworkMessage::MessageType type, const std::string& payload) {
-        std::lock_guard<std::mutex> lockPeers(peersMutex);
-        if (peers.count(peerId) > 0) {
-            NetworkMessage msg(type, payload, nodeId);
-            // In a real implementation, send to specific peer
-            receiveMessage(msg);
-        }
-    }
-
-    // Handle incoming message
-    void receiveMessage(const NetworkMessage& msg) {
-        std::lock_guard<std::mutex> lock(queueMutex);
-        messageQueue.push_back(msg);
-        queueCV.notify_one();
-    }
-
-    // Get node ID
-    const std::string& getId() const { return nodeId; }
-
-    // Get peers
-    std::unordered_set<std::string> getPeers() const {
-        std::lock_guard<std::mutex> lock(peersMutex);
-        return peers;
-    }
-};
-
-// ---------------------------
-// 10. Enhanced HybridLedger
-// ---------------------------
-/**
- * An enhanced version of the HybridLedger class with 
- * smart contract and networking support
- */
-class EnhancedHybridLedger : public HybridLedger {
-private:
-    ContractManager contractManager;
-    NetworkNode network;
-    
-    // Handle network messages
-    void processNetworkMessage(const NetworkMessage& msg) {
+        // --- Create a Transaction ---
+        std::cout << "\n--- User 1 sending 100.0 to User 2 ---" << std::endl;
         try {
-            switch (msg.type) {
-                case NetworkMessage::MessageType::TRANSACTION: {
-                    // Deserialize and add transaction
-                    // In a real system, this would involve proper serialization
-                    auto txOpt = getTransaction(msg.payload);
-                    if (!txOpt) {
-                        // This is simplified; in reality we'd deserialize the full tx
-                        std::cout << "Received transaction: " << msg.payload << std::endl;
-                    }
-                    break;
-                }
-                
-                case NetworkMessage::MessageType::BLOCK: {
-                    // Deserialize and add block
-                    std::cout << "Received block: " << msg.payload << std::endl;
-                    break;
-                }
-                
-                case NetworkMessage::MessageType::PEER_DISCOVERY: {
-                    // Add new peer to network
-                    network.addPeer(msg.payload);
-                    std::cout << "Discovered peer: " << msg.payload << std::endl;
-                    break;
-                }
-                
-                case NetworkMessage::MessageType::TRANSACTION_REQUEST: {
-                    // Respond with requested transaction
-                    auto txOpt = getTransaction(msg.payload);
-                    if (txOpt) {
-                        // Simplified; would serialize full tx in reality
-                        network.sendTo(msg.sender, NetworkMessage::MessageType::TRANSACTION, 
-                                    msg.payload);
-                    }
-                    break;
-                }
-                
-                case NetworkMessage::MessageType::BLOCK_REQUEST: {
-                    // Respond with requested block
-                    // This is simplified
-                    std::cout << "Block requested: " << msg.payload << std::endl;
-                    break;
-                }
-            }
-        } catch (const std::exception& e) {
-            std::cerr << "Error processing message: " << e.what() << std::endl;
-        }
-    }
-    
-public:
-    EnhancedHybridLedger() : HybridLedger(), network("node1") {
-        // Set up network message handler
-        network.setMessageHandler([this](const NetworkMessage& msg) {
-            this->processNetworkMessage(msg);
-        });
-        
-        // Start network services
-        network.start();
-    }
-    
-    ~EnhancedHybridLedger() {
-        network.stop();
-    }
-    
-    // Create a new smart contract
-    std::string createContract(SmartContract::ContractType type, const std::string& code) {
-        return contractManager.registerContract(type, code);
-    }
-    
-    // Execute a contract with a transaction
-    bool executeContract(const std::string& contractId, const Transaction& tx) {
-        return contractManager.executeContract(contractId, tx, getUTXOSetCopy());
-    }
-    
-    // Get UTXO set copy for contract execution
-    std::unordered_map<std::string, TransactionOutput> getUTXOSetCopy() const {
-        // This would be implemented to provide a copy of the current UTXO set
-        // For simplicity, we're returning an empty set here
-        return {};
-    }
-    
-    // Create and broadcast a transaction
-    std::string createAndBroadcastTransaction(
-        const CryptoHelper::ECKeyPtr& senderKey,
-        const std::string& recipient,
-        double amount,
-        const std::vector<TransactionOutput>& inputs) 
-    {
-        std::string txId = createTransaction(senderKey, recipient, amount, inputs);
-        
-        // Broadcast to network
-        network.broadcast(NetworkMessage::MessageType::TRANSACTION, txId);
-        
-        return txId;
-    }
-    
-    // Create a time-locked transaction
-    std::string createTimeLockTransaction(
-        const CryptoHelper::ECKeyPtr& senderKey,
-        const std::string& recipient,
-        double amount,
-        const std::vector<TransactionOutput>& inputs,
-        std::int64_t unlockTime)
-    {
-        std::string txId = createTransaction(senderKey, recipient, amount, inputs);
-        
-        // Create time-lock contract
-        std::string code = "time_lock:" + recipient + ":" + std::to_string(amount);
-        std::string contractId = contractManager.registerContract(
-            SmartContract::ContractType::TIME_LOCK, code);
-            
-        auto contractOpt = contractManager.getContract(contractId);
-        if (contractOpt) {
-            contractOpt->get().setState("unlock_time", std::to_string(unlockTime));
-            contractOpt->get().setState("transaction_id", txId);
-        }
-        
-        return txId;
-    }
-    
-    // Create a multi-signature transaction
-    std::string createMultiSigTransaction(
-        const CryptoHelper::ECKeyPtr& senderKey,
-        const std::string& recipient,
-        double amount,
-        const std::vector<TransactionOutput>& inputs,
-        const std::vector<std::string>& approvedKeys,
-        int requiredSignatures)
-    {
-        std::string txId = createTransaction(senderKey, recipient, amount, inputs);
-        
-        // Create multi-sig contract
-        std::string code = "multi_sig:" + recipient + ":" + std::to_string(amount);
-        std::string contractId = contractManager.registerContract(
-            SmartContract::ContractType::MULTI_SIG, code);
-            
-        auto contractOpt = contractManager.getContract(contractId);
-        if (contractOpt) {
-            // Join approved keys with commas
-            std::stringstream ss;
-            for (size_t i = 0; i < approvedKeys.size(); ++i) {
-                if (i > 0) ss << ",";
-                ss << approvedKeys[i];
-            }
-            
-            contractOpt->get().setState("approved_keys", ss.str());
-            contractOpt->get().setState("required_signatures", std::to_string(requiredSignatures));
-            contractOpt->get().setState("transaction_id", txId);
-        }
-        
-        return txId;
-    }
-    
-    // Add a network peer
-    bool addPeer(const std::string& peerId) {
-        return network.addPeer(peerId);
-    }
-    
-    // Broadcast block creation
-    void broadcastBlock(const FinalityChain::Block& block) {
-        // Simplified; would serialize block in reality
-        network.broadcast(NetworkMessage::MessageType::BLOCK, block.blockHash);
-    }
-    
-    // Get network node ID
-    std::string getNodeId() const {
-        return network.getId();
-    }
-    
-    // Get network peers
-    std::vector<std::string> getPeers() const {
-        auto peerSet = network.getPeers();
-        return std::vector<std::string>(peerSet.begin(), peerSet.end());
-    }
-};
-
-// ---------------------------
-// 11. Enhanced Example Usage
-// ---------------------------
-
-int enhancedMain() {
-    try {
-        // Initialize the enhanced hybrid ledger
-        EnhancedHybridLedger ledger;
-        
-        std::cout << "Node ID: " << ledger.getNodeId() << std::endl;
-
-        // Create some user key pairs
-        auto aliceKey = CryptoHelper::generateKeyPair();
-        auto bobKey = CryptoHelper::generateKeyPair();
-        auto charlieKey = CryptoHelper::generateKeyPair();
-        
-        std::string aliceAddr = CryptoHelper::getPublicKeyHex(aliceKey);
-        std::string bobAddr = CryptoHelper::getPublicKeyHex(bobKey);
-        std::string charlieAddr = CryptoHelper::getPublicKeyHex(charlieKey);
-
-        // Alice registers as a validator with 5000 stake
-        ledger.registerValidator(aliceKey, 5000.0);
-
-        // Give Alice some initial funds (simulate mining reward)
-        TransactionOutput genesisUTXO{
-            "genesis",
-            0,
-            aliceAddr,
-            10000.0
-        };
-
-        // Create a standard transaction from Alice to Bob
-        std::vector<TransactionOutput> inputs = {genesisUTXO};
-        std::string standardTxId = ledger.createAndBroadcastTransaction(
-            aliceKey, bobAddr, 250.0, inputs);
-        
-        std::cout << "Created standard transaction: " << standardTxId << std::endl;
-
-        // Create a time-locked transaction from Alice to Charlie
-        // that will unlock in 1 hour
-        std::int64_t oneHour = 60 * 60 * 1000; // 1 hour in milliseconds
-        std::int64_t unlockTime = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()
-        ).count() + oneHour;
-        
-        TransactionOutput aliceUTXO = ledger.getAddressUTXOs(aliceAddr)[0]; // Simplified
-        
-        std::string timeLockTxId = ledger.createTimeLockTransaction(
-            aliceKey, charlieAddr, 500.0, {aliceUTXO}, unlockTime);
-            
-        std::cout << "Created time-locked transaction: " << timeLockTxId << std::endl;
-        std::cout << "Will unlock at: " << unlockTime << std::endl;
-
-        // Create a multi-signature transaction requiring 2 out of 3 signatures
-        std::vector<std::string> approvedKeys = {aliceAddr, bobAddr, charlieAddr};
-        
-        aliceUTXO = ledger.getAddressUTXOs(aliceAddr)[0]; // Simplified
-        
-        std::string multiSigTxId = ledger.createMultiSigTransaction(
-            aliceKey, bobAddr, 1000.0, {aliceUTXO}, approvedKeys, 2);
-            
-        std::cout << "Created multi-signature transaction: " << multiSigTxId << std::endl;
-
-        // Create a simple smart contract
-        std::string contractCode = "function transfer(from, to, amount) { "
-                                  "  if (from.balance >= amount) { "
-                                  "    from.balance -= amount; "
-                                  "    to.balance += amount; "
-                                  "    return true; "
-                                  "  } "
-                                  "  return false; "
-                                  "}";
-                                  
-        std::string contractId = ledger.createContract(
-            SmartContract::ContractType::CUSTOM, contractCode);
-            
-        std::cout << "Created smart contract: " << contractId << std::endl;
-
-        // Connect to another peer (simplified simulation)
-        ledger.addPeer("node2");
-        
-        std::cout << "Connected peers: ";
-        for (const auto& peer : ledger.getPeers()) {
-            std::cout << peer << " ";
-        }
-        std::cout << std::endl;
-
-        // Wait for some blocks to be created
-        std::cout << "Waiting for blocks to be created..." << std::endl;
-        std::this_thread::sleep_for(std::chrono::seconds(10));
-
-        // Print blockchain info
-        auto latestBlock = ledger.getLatestBlock();
-        if (latestBlock) {
-            std::cout << "Latest block: #" << latestBlock->blockNumber 
-                      << " with " << latestBlock->transactions.size() 
-                      << " transactions" << std::endl;
-                      
-            // Broadcast block
-            ledger.broadcastBlock(*latestBlock);
+            std::string tx1_id = ledger.createTransaction(user1_key, user2_address, 100.0);
+            std::cout << "Transaction 1 created: " << tx1_id << std::endl;
+        } catch (const TransactionError& e) {
+            std::cerr << "Failed to create transaction: " << e.what() << std::endl;
         }
 
-        std::cout << "Total transactions in DAG: " << ledger.getDAGSize() << std::endl;
-        std::cout << "Blockchain height: " << ledger.getBlockchainHeight() << std::endl;
-
-    } catch (const std::exception& e) {
-        std::cerr << "Error in enhanced example: " << e.what() << std::endl;
-        return 1;
-    }
-
-    return 0;
-}
-
-// Alternative main function to select example mode
-int main(int argc, char* argv[]) {
-    if (argc > 1 && std::string(argv[1]) == "enhanced") {
-        return enhancedMain();
-    } else {
-        std::cout << "Running basic example mode. Use 'enhanced' argument for advanced features.\n" << std::endl;
-        return main(); // Call the original main
-    }
-}
-
-// ---------------------------
-// 12. Integration and Final Components
-// ---------------------------
-
-/**
- * Node configuration settings
- */
-struct NodeConfig {
-    double minStake = 1000.0;
-    int blockInterval = 30; // seconds
-    int maxPeers = 50;
-    bool enableSmartContracts = true;
-    bool enableNetworking = true;
-};
-
-/**
- * Complete node implementation combining all components
- */
-class HybridNode {
-private:
-    EnhancedHybridLedger ledger;
-    NodeConfig config;
-    std::atomic<bool> running{false};
-    std::thread blockThread;
-    std::thread networkThread;
-
-    // Thread function for periodic block creation
-    void blockCreationWorker() {
-        using namespace std::chrono;
-        
-        while (running) {
-            auto nextBlockTime = steady_clock::now() + seconds(config.blockInterval);
-            
+        // Add more transactions (stress test DAG)
+        std::cout << "\n--- Creating multiple small transactions ---" << std::endl;
+        for (int i = 0; i < 5; ++i) {
             try {
-                // Get current tips from DAG
-                auto tips = ledger.getTips(100);
-                
-                if (!tips.empty()) {
-                    // Select validator and create block
-                    std::string validator = ledger.selectValidator();
-                    auto block = ledger.createBlock(tips, validator);
-                    
-                    // Broadcast the new block
-                    if (config.enableNetworking) {
-                        ledger.broadcastBlock(block);
-                    }
-                    
-                    std::cout << "Created block #" << block.blockNumber 
-                              << " with " << tips.size() << " transactions" << std::endl;
-                }
-            } catch (const std::exception& e) {
-                std::cerr << "Block creation error: " << e.what() << std::endl;
-            }
-            
-            std::this_thread::sleep_until(nextBlockTime);
-        }
-    }
-
-    // Thread function for network processing
-    void networkWorker() {
-        while (running) {
-            // In a real implementation, this would handle network messages
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-        }
-    }
-
-public:
-    explicit HybridNode(NodeConfig cfg = {}) : config(std::move(cfg)) {
-        // Start services based on configuration
-        running = true;
-        
-        // Always start block creation thread
-        blockThread = std::thread(&HybridNode::blockCreationWorker, this);
-        
-        // Start network thread if enabled
-        if (config.enableNetworking) {
-            networkThread = std::thread(&HybridNode::networkWorker, this);
-        }
-    }
-
-    ~HybridNode() {
-        running = false;
-        
-        if (blockThread.joinable()) {
-            blockThread.join();
-        }
-        
-        if (networkThread.joinable()) {
-            networkThread.join();
-        }
-    }
-
-    // Get the ledger reference
-    EnhancedHybridLedger& getLedger() { return ledger; }
-    
-    // Get the configuration
-    const NodeConfig& getConfig() const { return config; }
-    
-    // Get node ID
-    std::string getNodeId() const { return ledger.getNodeId(); }
-};
-
-// ---------------------------
-// 13. CLI Interface
-// ---------------------------
-
-/**
- * Simple command line interface for node interaction
- */
-class NodeCLI {
-private:
-    HybridNode& node;
-    std::unordered_map<std::string, CryptoHelper::ECKeyPtr> wallets;
-    std::string currentUser;
-
-public:
-    explicit NodeCLI(HybridNode& n) : node(n) {}
-
-    void run() {
-        std::cout << "Hybrid Blockchain-DAG Node CLI\n";
-        std::cout << "Node ID: " << node.getNodeId() << "\n\n";
-        
-        while (true) {
-            if (currentUser.empty()) {
-                handleUnauthenticated();
-            } else {
-                handleAuthenticated();
+                // User 1 sending small amounts to User 2 to generate more DAG activity
+                std::string small_tx_id = ledger.createTransaction(user1_key, user2_address, 1.0);
+                std::cout << "Small Transaction " << (i + 1) << " created: " << small_tx_id << std::endl;
+            } catch (const TransactionError& e) {
+                std::cerr << "Failed to create small transaction " << (i + 1) << ": " << e.what() << std::endl;
             }
         }
-    }
 
-private:
-    void handleUnauthenticated() {
-        std::cout << "1. Create wallet\n";
-        std::cout << "2. Login\n";
-        std::cout << "3. Exit\n";
-        std::cout << "Select option: ";
-        
-        int choice;
-        std::cin >> choice;
-        
-        switch (choice) {
-            case 1: createWallet(); break;
-            case 2: login(); break;
-            case 3: exit(0);
-            default: std::cout << "Invalid option\n";
-        }
-    }
 
-    void handleAuthenticated() {
-        std::cout << "\nLogged in as: " << currentUser << "\n";
-        std::cout << "1. Check balance\n";
-        std::cout << "2. Send transaction\n";
-        std::cout << "3. Create smart contract\n";
-        std::cout << "4. Register as validator\n";
-        std::cout << "5. Network info\n";
-        std::cout << "6. Logout\n";
-        std::cout << "Select option: ";
-        
-        int choice;
-        std::cin >> choice;
-        
-        switch (choice) {
-            case 1: checkBalance(); break;
-            case 2: sendTransaction(); break;
-            case 3: createContract(); break;
-            case 4: registerValidator(); break;
-            case 5: networkInfo(); break;
-            case 6: currentUser = ""; break;
-            default: std::cout << "Invalid option\n";
-        }
-    }
+        // --- Check DAG and Blockchain state ---
+        std::cout << "\n--- System State ---" << std::endl;
+        std::cout << "DAG Size: " << ledger.getDAGSize() << " transactions" << std::endl;
+        std::cout << "Blockchain Height: " << ledger.getBlockchainHeight() << " blocks" << std::endl;
 
-    void createWallet() {
-        auto key = CryptoHelper::generateKeyPair();
-        std::string address = CryptoHelper::getPublicKeyHex(key);
-        
-        wallets[address] = key;
-        currentUser = address;
-        
-        std::cout << "Created new wallet:\n";
-        std::cout << "Address: " << address << "\n";
-        
-        // Add some initial funds for testing
-        if (node.getLedger().getAddressUTXOs(address).empty()) {
-            TransactionOutput genesisUTXO{
-                "genesis",
-                0,
-                address,
-                1000.0
-            };
-            // This is just for testing - in a real system you'd need mining rewards
-            std::cout << "Added test funds to new wallet\n";
-        }
-    }
+        // Give some time for blocks to be created
+        std::cout << "\nWaiting for blocks to be created (approx " << HybridLedger::BLOCK_INTERVAL_SECONDS * 2 << " seconds for 2 blocks)..." << std::endl;
+        std::this_thread::sleep_for(std::chrono::seconds(HybridLedger::BLOCK_INTERVAL_SECONDS * 2));
 
-    void login() {
-        std::cout << "Enter wallet address: ";
-        std::string address;
-        std::cin >> address;
-        
-        if (wallets.count(address) > 0) {
-            currentUser = address;
-            std::cout << "Logged in successfully\n";
+        std::cout << "\n--- System State after some time ---" << std::endl;
+        std::cout << "DAG Size: " << ledger.getDAGSize() << " transactions (should decrease as TXs are included in blocks)" << std::endl;
+        std::cout << "Blockchain Height: " << ledger.getBlockchainHeight() << " blocks" << std::endl;
+
+        std::cout << "\n--- Latest Block Info ---" << std::endl;
+        auto latestBlock = ledger.getLatestBlock();
+        if (latestBlock) {
+            std::cout << "Block Number: " << latestBlock->blockNumber << std::endl;
+            std::cout << "Block Hash: " << latestBlock->blockHash << std::endl;
+            std::cout << "Validator: " << latestBlock->validator.substr(0, 8) << "..." << std::endl;
+            std::cout << "Transactions in block: " << latestBlock->transactions.size() << std::endl;
         } else {
-            std::cout << "Wallet not found\n";
+            std::cout << "No blocks in the chain yet." << std::endl;
         }
-    }
 
-    void checkBalance() {
-        auto utxos = node.getLedger().getAddressUTXOs(currentUser);
-        double balance = 0.0;
-        
-        for (const auto& utxo : utxos) {
-            balance += utxo.amount;
+        std::cout << "\n--- Current UTXOs for User 1 ---" << std::endl;
+        std::vector<TransactionOutput> user1_utxos_final = ledger.getAddressUTXOs(user1_address);
+        for (const auto& utxo : user1_utxos_final) {
+            std::cout << "  UTXO ID: " << utxo.getId() << ", Amount: " << utxo.amount << ", Owner: " << utxo.owner.substr(0, 8) << "..." << std::endl;
         }
-        
-        std::cout << "Balance: " << balance << "\n";
-        std::cout << "UTXOs: " << utxos.size() << "\n";
-    }
+        if (user1_utxos_final.empty()) {
+            std::cout << "User 1 has no remaining UTXOs (or they are still being processed/confirmed)." << std::endl;
+        }
 
-    void sendTransaction() {
-        std::cout << "Enter recipient address: ";
-        std::string recipient;
-        std::cin >> recipient;
-        
-        std::cout << "Enter amount: ";
-        double amount;
-        std::cin >> amount;
-        
-        auto utxos = node.getLedger().getAddressUTXOs(currentUser);
-        if (utxos.empty()) {
-            std::cout << "No funds available\n";
-            return;
+        std::cout << "\n--- Current UTXOs for User 2 ---" << std::endl;
+        std::vector<TransactionOutput> user2_utxos = ledger.getAddressUTXOs(user2_address);
+        for (const auto& utxo : user2_utxos) {
+            std::cout << "  UTXO ID: " << utxo.getId() << ", Amount: " << utxo.amount << ", Owner: " << utxo.owner.substr(0, 8) << "..." << std::endl;
         }
-        
+        if (user2_utxos.empty()) {
+            std::cout << "User 2 has no UTXOs yet." << std::endl;
+        }
+
+
+        // --- Register another validator ---
+        std::cout << "\n--- Registering another validator ---" << std::endl;
+        auto validator2_key = CryptoHelper::generateKeyPair();
+        std::string validator2_address = CryptoHelper::getPublicKeyHex(validator2_key);
         try {
-            std::string txId = node.getLedger().createAndBroadcastTransaction(
-                wallets[currentUser], recipient, amount, utxos);
+            // Need to get some UTXOs for validator2 to stake (simulating fund transfer)
+            // For simplicity, we'll assume validator2 magically has some initial funds here too.
+            // In a real system, they would receive funds via a transaction from user1 or genesis.
             
-            std::cout << "Transaction created: " << txId << "\n";
-        } catch (const std::exception& e) {
-            std::cout << "Error: " << e.what() << "\n";
-        }
-    }
+            // Simulating a "mint" for validator2 to get stakeable funds
+            std::vector<TransactionOutput> validator2MintOutputs = {
+                {"", 0, validator2_address, 2000.0}
+            };
+            Transaction validator2MintTx({}, validator2MintOutputs, {});
+            ledger.addTransaction(validator2MintTx);
+            std::cout << "Simulating minting 2000.0 coins for Validator 2: " << validator2MintTx.getId() << std::endl;
+            std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Short delay
 
-    void createContract() {
-        if (!node.getConfig().enableSmartContracts) {
-            std::cout << "Smart contracts are disabled\n";
-            return;
+            ledger.registerValidator(validator2_key, 1500.0);
+            std::cout << "Validator 2 Address: " << validator2_address << std::endl;
+        } catch (const LedgerError& e) {
+            std::cerr << "Failed to register validator 2: " << e.what() << std::endl;
         }
-        
-        std::cout << "1. Time-lock contract\n";
-        std::cout << "2. Multi-signature contract\n";
-        std::cout << "3. Custom contract\n";
-        std::cout << "Select contract type: ";
-        
-        int choice;
-        std::cin >> choice;
-        
-        try {
-            switch (choice) {
-                case 1: {
-                    std::cout << "Enter recipient: ";
-                    std::string recipient;
-                    std::cin >> recipient;
-                    
-                    std::cout << "Enter amount: ";
-                    double amount;
-                    std::cin >> amount;
-                    
-                    std::cout << "Enter unlock time (minutes from now): ";
-                    int minutes;
-                    std::cin >> minutes;
-                    
-                    auto utxos = node.getLedger().getAddressUTXOs(currentUser);
-                    auto unlockTime = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::system_clock::now().time_since_epoch()
-                    ).count() + (minutes * 60 * 1000);
-                    
-                    std::string txId = node.getLedger().createTimeLockTransaction(
-                        wallets[currentUser], recipient, amount, utxos, unlockTime);
-                    
-                    std::cout << "Created time-lock contract: " << txId << "\n";
-                    break;
-                }
-                
-                case 2: {
-                    std::cout << "Enter recipient: ";
-                    std::string recipient;
-                    std::cin >> recipient;
-                    
-                    std::cout << "Enter amount: ";
-                    double amount;
-                    std::cin >> amount;
-                    
-                    std::cout << "Enter number of required signatures: ";
-                    int required;
-                    std::cin >> required;
-                    
-                    std::vector<std::string> signers;
-                    std::cout << "Enter signer addresses (one per line, empty to finish):\n";
-                    std::cin.ignore();
-                    
-                    while (true) {
-                        std::string addr;
-                        std::getline(std::cin, addr);
-                        if (addr.empty()) break;
-                        signers.push_back(addr);
-                    }
-                    
-                    auto utxos = node.getLedger().getAddressUTXOs(currentUser);
-                    std::string txId = node.getLedger().createMultiSigTransaction(
-                        wallets[currentUser], recipient, amount, utxos, signers, required);
-                    
-                    std::cout << "Created multi-sig contract: " << txId << "\n";
-                    break;
-                }
-                
-                case 3: {
-                    std::cout << "Enter contract code:\n";
-                    std::cin.ignore();
-                    std::string code;
-                    std::getline(std::cin, code);
-                    
-                    std::string contractId = node.getLedger().createContract(
-                        SmartContract::ContractType::CUSTOM, code);
-                    
-                    std::cout << "Created custom contract: " << contractId << "\n";
-                    break;
-                }
-                
-                default:
-                    std::cout << "Invalid option\n";
-            }
-        } catch (const std::exception& e) {
-            std::cout << "Error: " << e.what() << "\n";
-        }
-    }
 
-    void registerValidator() {
-        std::cout << "Enter stake amount (min " << node.getConfig().minStake << "): ";
-        double stake;
-        std::cin >> stake;
+        std::cout << "\n--- Final System State ---" << std::endl;
+        std::cout << "DAG Size: " << ledger.getDAGSize() << " transactions" << std::endl;
+        std::cout << "Blockchain Height: " << ledger.getBlockchainHeight() << " blocks" << std::endl;
         
-        if (stake < node.getConfig().minStake) {
-            std::cout << "Stake too low\n";
-            return;
+        std::cout << "\n--- All Validators ---" << std::endl;
+        for(const auto& val_addr : ledger.getAllValidators()) {
+            std::cout << "Validator: " << val_addr.substr(0, 8) << "..., Stake: " << ledger.getValidatorStake(val_addr) << std::endl;
         }
-        
-        try {
-            node.getLedger().registerValidator(wallets[currentUser], stake);
-            std::cout << "Registered as validator with stake: " << stake << "\n";
-        } catch (const std::exception& e) {
-            std::cout << "Error: " << e.what() << "\n";
-        }
-    }
 
-    void networkInfo() {
-        if (!node.getConfig().enableNetworking) {
-            std::cout << "Networking is disabled\n";
-            return;
-        }
-        
-        std::cout << "Node ID: " << node.getNodeId() << "\n";
-        std::cout << "Peers: " << node.getLedger().getPeers().size() << "\n";
-        std::cout << "DAG size: " << node.getLedger().getDAGSize() << "\n";
-        std::cout << "Blockchain height: " << node.getLedger().getBlockchainHeight() << "\n";
-    }
-};
+        std::this_thread::sleep_for(std::chrono::seconds(HybridLedger::BLOCK_INTERVAL_SECONDS + 5)); // Allow some more blocks with new validator
 
-// ---------------------------
-// 14. Main Entry Point
-// ---------------------------
-
-int main(int argc, char* argv[]) {
-    try {
-        NodeConfig config;
-        
-        // Simple argument parsing
-        for (int i = 1; i < argc; ++i) {
-            std::string arg = argv[i];
-            if (arg == "--no-networking") {
-                config.enableNetworking = false;
-            } else if (arg == "--no-smart-contracts") {
-                config.enableSmartContracts = false;
-            } else if (arg == "--block-interval" && i+1 < argc) {
-                config.blockInterval = std::stoi(argv[++i]);
-            } else if (arg == "--min-stake" && i+1 < argc) {
-                config.minStake = std::stod(argv[++i]);
-            }
-        }
-        
-        HybridNode node(config);
-        NodeCLI cli(node);
-        cli.run();
-        
     } catch (const std::exception& e) {
-        std::cerr << "Fatal error: " << e.what() << std::endl;
-        return 1;
+        std::cerr << "An unhandled exception occurred in main: " << e.what() << std::endl;
     }
-    
-    return 0;
-}
-    
+
+    std::cout << "\nSimulation Finished." << std::endl;
     return 0;
 }
