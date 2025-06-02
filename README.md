@@ -1,12 +1,25 @@
 # Platireum Network
 
-A next-generation blockchain network implementation focusing on scalability, security, and smart contract functionality.
+<div align="center">
+
+![Platireum Logo](https://raw.githubusercontent.com/platireumTech/Platireum-Network/main/docs/assets/logo.png)
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Build Status](https://img.shields.io/github/workflow/status/platireumTech/Platireum-Network/CI)](https://github.com/platireumTech/Platireum-Network/actions)
+[![GitHub Issues](https://img.shields.io/github/issues/platireumTech/Platireum-Network)](https://github.com/platireumTech/Platireum-Network/issues)
+[![GitHub Stars](https://img.shields.io/github/stars/platireumTech/Platireum-Network)](https://github.com/platireumTech/Platireum-Network/stargazers)
+
+🔗 Secure • ⚡ Fast • 💪 Scalable
+
+</div>
+
+Hybrid blockchain-DAG system combining blockchain security with DAG scalability. It uses Proof-of-Stake for periodic block creation to finalize DAG transactions, allowing parallel processing. The system employs a UTXO model and supports smart contracts via cryptographic validation.
 
 ## Overview
 
 Platireum Network is a blockchain platform that provides a robust infrastructure for decentralized applications and digital asset management. The project implements core blockchain functionality, networking protocols, smart contracts, and efficient storage solutions.
 
-## Features
+## ✨ Features
 
 - **Core Blockchain Implementation**: Secure and efficient blockchain core with consensus mechanism
 - **Smart Contracts**: Support for executing and managing smart contracts
@@ -14,7 +27,7 @@ Platireum Network is a blockchain platform that provides a robust infrastructure
 - **Advanced Networking**: P2P networking capabilities for node communication
 - **Efficient Storage**: Optimized storage solutions for blockchain data
 
-## Project Structure
+## 🏗️ Project Structure
 
 ```
 platireum-network/
@@ -30,7 +43,7 @@ platireum-network/
 └── CMakeLists.txt    # CMake build configuration
 ```
 
-## Building the Project
+## 🚀 Building the Project
 
 ### Prerequisites
 
@@ -42,19 +55,21 @@ platireum-network/
 ### Build Instructions
 
 1. Clone the repository:
+
 ```bash
 git clone https://github.com/platireumTech/Platireum-Network.git
 cd Platireum-Network
 ```
 
 2. Create a build directory and run CMake:
+
 ```bash
 mkdir build && cd build
 cmake ..
 make
 ```
 
-## Contributing
+## 👥 Contributing
 
 Contributions are welcome! Please feel free to submit pull requests.
 
@@ -64,16 +79,16 @@ Contributions are welcome! Please feel free to submit pull requests.
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
-## License
+## 📄 License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
 
-## Contact
+## 📬 Contact
 
 - Project Website: [https://platireum.tech](https://platireum.tech)
 - GitHub: [https://github.com/platireumTech/Platireum-Network](https://github.com/platireumTech/Platireum-Network)
 
-## Acknowledgments
+## 🙏 Acknowledgments
 
 - Thanks to all contributors who have helped shape this project
 - Special thanks to the blockchain community for their continuous support
