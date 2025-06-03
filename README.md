@@ -1,6 +1,6 @@
 # Platireum Network
+![PLT-Logo](https://github.com/user-attachments/assets/2b3df40d-c052-4561-b0fd-a822b36b96c2)
 
-![cropped-cropped-Platirium-Tree_Logo_1_highres-removebg-preview](https://github.com/user-attachments/assets/2e8915e4-0617-45f3-a2f2-d628e838a3e6)
 
 <div align="center">
 
