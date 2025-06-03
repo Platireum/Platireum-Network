@@ -87,7 +87,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## 📬 Contact
 
-- Project Website: [https://platireum.tech](https://platireum.tech)
+- Project Website: [https://platireum.com](https://platireum.com)
 - GitHub: [https://github.com/platireumTech/Platireum-Network](https://github.com/platireumTech/Platireum-Network)
 
 ## 🙏 Acknowledgments
