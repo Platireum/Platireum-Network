@@ -1,8 +1,10 @@
 # Platireum Network
 
+![cropped-cropped-Platirium-Tree_Logo_1_highres-removebg-preview](https://github.com/user-attachments/assets/2e8915e4-0617-45f3-a2f2-d628e838a3e6)
+
 <div align="center">
 
-![Platireum Logo](https://raw.githubusercontent.com/platireumTech/Platireum-Network/main/docs/assets/logo.png)
+
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Build Status](https://img.shields.io/github/workflow/status/platireumTech/Platireum-Network/CI)](https://github.com/platireumTech/Platireum-Network/actions)
