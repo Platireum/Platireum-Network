@@ -1,18 +1,18 @@
-#include "validator_manager.h" // يجب تضمين ملف الرأس الخاص بنا أولاً
-#include <iostream>            // للاستخدام في دوال الطباعة لتصحيح الأخطاء
-#include <numeric>             // لاستخدام std::accumulate (ليس مستخدماً حالياً ولكن يمكن أن يكون مفيداً)
+#include "validator_manager.h" // We must include our own header file first
+#include <iostream>            // For use in printing functions for debugging
+#include <numeric>             // For using std::accumulate (not currently used but can be useful)
 
-// --- تنفيذ دوال فئة ValidatorManager ---
+// --- Implementation of ValidatorManager class functions ---
 
 // Constructor
 ValidatorManager::ValidatorManager()
-    // تهيئة مولد الأرقام العشوائية باستخدام الطابع الزمني الحالي
+    // Initialize the random number generator using the current timestamp
     : rng(std::chrono::high_resolution_clock::now().time_since_epoch().count()),
       totalStake(0.0) {
-    // يمكن إضافة أي تهيئة أخرى هنا
+    // Any other initialization can be added here
 }
 
-// تسجيل مدقق جديد أو تحديث حصة مدقق موجود
+// Register a new validator or update the stake of an existing one
 bool ValidatorManager::registerValidator(const std::string& publicKey, double amount) {
     if (publicKey.empty()) {
         throw ValidatorManagerError("Public key cannot be empty for validator registration.");
@@ -20,32 +20,32 @@ bool ValidatorManager::registerValidator(const std::string& publicKey, double am
     if (amount < 0) {
         throw ValidatorManagerError("Stake amount cannot be negative for validator registration.");
     }
-    // يمكن هنا وضع حد أدنى للحصة (مثلاً، 100 عملة)
+    // A minimum stake can be set here (e.g., 100 coins)
     // if (amount < MIN_STAKE_AMOUNT) {
     //     throw ValidatorManagerError("Stake amount " + std::to_string(amount) + " is below minimum required stake.");
     // }
 
     auto it = activeValidators.find(publicKey);
     if (it != activeValidators.end()) {
-        // إذا كان المدقق موجوداً بالفعل، قم بتحديث حصته
+        // If the validator already exists, update its stake
         double oldStake = it->second.stake;
         it->second.stake = amount;
-        totalStake += (amount - oldStake); // تحديث مجموع الحصص الكلي
+        totalStake += (amount - oldStake); // Update the total stake
         std::cout << "Validator " << publicKey.substr(0, 8) << "... stake updated to " << amount << std::endl;
     } else {
-        // إذا كان مدققاً جديداً، قم بإضافته
+        // If it's a new validator, add it
         activeValidators.emplace(publicKey, Validator(publicKey, amount));
-        totalStake += amount; // إضافة الحصة إلى المجموع الكلي
+        totalStake += amount; // Add the stake to the total sum
         std::cout << "Validator " << publicKey.substr(0, 8) << "... registered with stake " << amount << std::endl;
     }
     return true;
 }
 
-// إزالة مدقق
+// Remove a validator
 bool ValidatorManager::removeValidator(const std::string& publicKey) {
     auto it = activeValidators.find(publicKey);
     if (it != activeValidators.end()) {
-        totalStake -= it->second.stake; // خصم حصة المدقق من المجموع الكلي
+        totalStake -= it->second.stake; // Deduct the validator's stake from the total sum
         activeValidators.erase(it);
         std::cout << "Validator " << publicKey.substr(0, 8) << "... removed." << std::endl;
         return true;
@@ -54,7 +54,7 @@ bool ValidatorManager::removeValidator(const std::string& publicKey) {
     return false;
 }
 
-// تحديث حصة مدقق موجود
+// Update the stake of an existing validator
 void ValidatorManager::updateValidatorStake(const std::string& publicKey, double newAmount) {
     if (newAmount < 0) {
         throw ValidatorManagerError("New stake amount cannot be negative.");
@@ -70,14 +70,14 @@ void ValidatorManager::updateValidatorStake(const std::string& publicKey, double
     totalStake += (newAmount - oldStake);
     std::cout << "Validator " << publicKey.substr(0, 8) << "... stake updated from " << oldStake << " to " << newAmount << std::endl;
 
-    // يمكن هنا إضافة منطق لإزالة المدقق إذا انخفضت حصته عن الحد الأدنى
+    // Logic can be added here to remove the validator if its stake falls below the minimum
     // if (newAmount < MIN_STAKE_AMOUNT) {
     //     removeValidator(publicKey);
     //     std::cout << "Validator " << publicKey.substr(0, 8) << "... removed due to insufficient stake." << std::endl;
     // }
 }
 
-// اختيار مدقق بناءً على حصته
+// Pick a validator based on their stake
 std::string ValidatorManager::pickValidator() const {
     if (activeValidators.empty()) {
         throw ValidatorManagerError("No active validators to pick from.");
@@ -86,28 +86,28 @@ std::string ValidatorManager::pickValidator() const {
         throw ValidatorManagerError("Total stake is zero or negative, cannot pick a validator.");
     }
 
-    // توزيع عشوائي موحد (uniform distribution) لاختيار نقطة على طول "شريط" الحصص
+    // Uniform random distribution to pick a point along the "stake bar"
     std::uniform_real_distribution<> dist(0.0, totalStake);
-    double pick = dist(rng); // اختر رقماً عشوائياً بين 0 والمجموع الكلي للحصص
+    double pick = dist(rng); // Pick a random number between 0 and the total stake
 
     double currentSum = 0.0;
-    // المرور على المدققين وإضافة حصصهم بشكل تراكمي حتى نصل إلى النقطة المختارة
+    // Iterate through validators and add their stakes cumulatively until we reach the chosen point
     for (const auto& pair : activeValidators) {
         currentSum += pair.second.stake;
         if (pick <= currentSum) {
-            return pair.first; // لقد وجدنا المدقق!
+            return pair.first; // We found the validator!
         }
     }
-    // هذا الجزء لا يجب أن يتم الوصول إليه في حالة المنطق السليم
+    // This part should not be reached in a sane logic case
     throw ValidatorManagerError("Failed to pick a validator. This should not happen.");
 }
 
-// التحقق مما إذا كان المفتاح العام ينتمي إلى مدقق نشط
+// Check if the public key belongs to an active validator
 bool ValidatorManager::isActiveValidator(const std::string& publicKey) const {
     return activeValidators.count(publicKey) > 0;
 }
 
-// جلب حصة مدقق معين
+// Get the stake of a specific validator
 double ValidatorManager::getValidatorStake(const std::string& publicKey) const {
     auto it = activeValidators.find(publicKey);
     if (it == activeValidators.end()) {
@@ -116,14 +116,14 @@ double ValidatorManager::getValidatorStake(const std::string& publicKey) const {
     return it->second.stake;
 }
 
-// مسح جميع المدققين
+// Clear all validators
 void ValidatorManager::clear() {
     activeValidators.clear();
     totalStake = 0.0;
     std::cout << "All validators cleared." << std::endl;
 }
 
-// طباعة قائمة المدققين الحاليين
+// Print the list of current validators
 void ValidatorManager::printValidators() const {
     std::cout << "\n--- Active Validators Status ---" << std::endl;
     if (activeValidators.empty()) {
