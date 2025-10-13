@@ -1,40 +1,40 @@
-#include "crypto_helper.h" // يجب تضمين ملف الرأس الخاص بنا أولاً
+#include "crypto_helper.h" // We must include our own header file first
 
-// تهيئة العلم الثابت لضمان تهيئة OpenSSL مرة واحدة فقط
+// Initialize the static flag to ensure OpenSSL is initialized only once
 std::once_flag CryptoHelper::cryptoInitFlag;
 
-// --- تنفيذ الدوال المساعدة لـ CryptoHelper ---
+// --- Implementation of CryptoHelper helper functions ---
 
 void CryptoHelper::initializeOpenSSL() {
-    // هذه الدالة تقوم بتهيئة مكتبات OpenSSL
-    // OpenSSL_add_all_algorithms() : تضيف دعمًا لجميع الخوارزميات (التشفير، الهاش، التوقيع).
-    // ERR_load_crypto_strings()    : تحمل سلاسل الأخطاء لتسهيل تصحيح الأخطاء إذا حدث خطأ ما في OpenSSL.
+    // This function initializes the OpenSSL libraries
+    // OpenSSL_add_all_algorithms(): Adds support for all algorithms (encryption, hashing, signing).
+    // ERR_load_crypto_strings()   : Loads error strings to facilitate debugging if an error occurs in OpenSSL.
     OpenSSL_add_all_algorithms();
     ERR_load_crypto_strings();
 }
 
 CryptoHelper::ECKeyPtr CryptoHelper::generateKeyPair() {
-    // نضمن تهيئة OpenSSL مرة واحدة فقط عند أول استدعاء لهذه الدالة
+    // We ensure OpenSSL is initialized only once upon the first call to this function
     std::call_once(cryptoInitFlag, initializeOpenSSL);
     
-    // إنشاء بنية مفتاح EC جديدة باستخدام منحنى secp256k1 (منحنى شائع وآمن لعملات مثل البيتكوين)
-    // EC_KEY_free هو دالة تحرير الذاكرة التي يستخدمها std::shared_ptr تلقائياً عند عدم الحاجة للمفتاح
+    // Create a new EC key structure using the secp256k1 curve (a common and secure curve for currencies like Bitcoin)
+    // EC_KEY_free is the memory release function that std::shared_ptr uses automatically when the key is no longer needed
     ECKeyPtr key(EC_KEY_new_by_curve_name(NID_secp256k1), EC_KEY_free);
     if (!key) {
-        // إذا فشل إنشاء البنية، نطلق استثناء CryptoError
+        // If the structure creation fails, we throw a CryptoError exception
         throw CryptoError("Failed to create EC key structure");
     }
     
-    // توليد زوج المفاتيح (الخاص والعام)
+    // Generate the key pair (private and public)
     if (EC_KEY_generate_key(key.get()) != 1) {
-        // إذا فشل التوليد، نطلق استثناء
+        // If generation fails, we throw an exception
         throw CryptoError("Failed to generate key pair");
     }
     
-    // تعيين خيار ضغط المفتاح العام (يجعله أصغر للتخزين والنقل)
+    // Set the public key compression option (makes it smaller for storage and transport)
     EC_KEY_set_conv_form(key.get(), POINT_CONVERSION_COMPRESSED);
     
-    return key; // نُعيد المؤشر الذكي للمفتاح
+    return key; // We return the smart pointer to the key
 }
 
 std::string CryptoHelper::getPublicKeyHex(const ECKeyPtr& key) {
@@ -44,15 +44,15 @@ std::string CryptoHelper::getPublicKeyHex(const ECKeyPtr& key) {
     }
     
     const EC_GROUP* group = EC_KEY_get0_group(key.get());
-    // BN_CTX هو سياق للمكتبات الكبيرة للأرقام، يُستخدم في بعض عمليات التشفير.
-    // يتم تحريره تلقائياً بواسطة std::unique_ptr
+    // BN_CTX is a context for big number libraries, used in some cryptographic operations.
+    // It is automatically freed by std::unique_ptr
     std::unique_ptr<BN_CTX, decltype(&BN_CTX_free)> ctx(BN_CTX_new(), BN_CTX_free);
     if (!ctx) {
         throw CryptoError("Failed to create BN context");
     }
     
-    // تحويل المفتاح العام من صيغة EC_POINT إلى سلسلة نصية سداسية عشرية مضغوطة
-    // OPENSSL_free هو دالة تحرير الذاكرة التي يستخدمها std::unique_ptr للنص السداسي العشري
+    // Convert the public key from EC_POINT format to a compressed hexadecimal string
+    // OPENSSL_free is the memory release function that std::unique_ptr uses for the hex string
     std::unique_ptr<char, decltype(&OPENSSL_free)> hexStr(
         EC_POINT_point2hex(group, pubKey, POINT_CONVERSION_COMPRESSED, ctx.get()),
         OPENSSL_free
@@ -62,17 +62,17 @@ std::string CryptoHelper::getPublicKeyHex(const ECKeyPtr& key) {
         throw CryptoError("Failed to convert public key to hex string");
     }
     
-    return std::string(hexStr.get()); // نُعيد السلسلة النصية
+    return std::string(hexStr.get()); // We return the string
 }
 
 std::vector<unsigned char> CryptoHelper::signData(const ECKeyPtr& privateKey, const std::string& message) {
-    std::call_once(cryptoInitFlag, initializeOpenSSL); // نضمن التهيئة
+    std::call_once(cryptoInitFlag, initializeOpenSSL); // We ensure initialization
     
-    // أولاً، نقوم بتجزئة (hashing) الرسالة باستخدام SHA-256
+    // First, we hash the message using SHA-256
     std::vector<unsigned char> msgHash = sha256Bytes(message);
     
-    // التوقيع على التجزئة باستخدام المفتاح الخاص.
-    // ECDSA_SIG_free هو دالة تحرير الذاكرة التي يستخدمها std::unique_ptr للتوقيع.
+    // Sign the hash using the private key.
+    // ECDSA_SIG_free is the memory release function that std::unique_ptr uses for the signature.
     std::unique_ptr<ECDSA_SIG, decltype(&ECDSA_SIG_free)> sig(
         ECDSA_do_sign(msgHash.data(), msgHash.size(), privateKey.get()),
         ECDSA_SIG_free
@@ -82,28 +82,28 @@ std::vector<unsigned char> CryptoHelper::signData(const ECKeyPtr& privateKey, co
         throw CryptoError("ECDSA signing failed");
     }
     
-    // تحويل التوقيع إلى صيغة DER (Distinguished Encoding Rules)
-    // هذه صيغة قياسية لتشفير التوقيعات.
+    // Convert the signature to DER (Distinguished Encoding Rules) format
+    // This is a standard format for encoding signatures.
     unsigned char* der = nullptr;
-    int derLen = i2d_ECDSA_SIG(sig.get(), &der); // i2d تعني "Internal to DER"
+    int derLen = i2d_ECDSA_SIG(sig.get(), &der); // i2d means "Internal to DER"
     
     if (derLen <= 0) {
         throw CryptoError("Failed to convert signature to DER format");
     }
     
-    // نُعيد التوقيع كمتجه من البايتات (unsigned chars)
+    // We return the signature as a vector of bytes (unsigned chars)
     std::vector<unsigned char> signature(der, der + derLen);
-    OPENSSL_free(der); // يجب تحرير الذاكرة المخصصة بواسطة i2d_ECDSA_SIG
+    OPENSSL_free(der); // The memory allocated by i2d_ECDSA_SIG must be freed
     
     return signature;
 }
 
 bool CryptoHelper::verifySignature(const std::string& publicKeyHex,
-                                   const std::vector<unsigned char>& signature,
-                                   const std::string& message) {
-    std::call_once(cryptoInitFlag, initializeOpenSSL); // نضمن التهيئة
+                                     const std::vector<unsigned char>& signature,
+                                     const std::string& message) {
+    std::call_once(cryptoInitFlag, initializeOpenSSL); // We ensure initialization
 
-    // 1. إعادة بناء المفتاح العام من السلسلة السداسية العشرية
+    // 1. Reconstruct the public key from the hexadecimal string
     std::unique_ptr<EC_GROUP, decltype(&EC_GROUP_free)> group(
         EC_GROUP_new_by_curve_name(NID_secp256k1), EC_GROUP_free
     );
@@ -128,7 +128,7 @@ bool CryptoHelper::verifySignature(const std::string& publicKeyHex,
     std::unique_ptr<EC_POINT, decltype(&EC_POINT_free)> point(
         EC_POINT_new(group.get()), EC_POINT_free
     );
-    // EC_POINT_hex2point : تحول المفتاح العام من سلسلة سداسية عشرية إلى بنية EC_POINT
+    // EC_POINT_hex2point: Converts the public key from a hex string to an EC_POINT structure
     if (!point || EC_POINT_hex2point(group.get(), publicKeyHex.c_str(), point.get(), ctx.get()) == nullptr) {
         throw CryptoError("Failed to decode public key from hex string");
     }
@@ -137,10 +137,10 @@ bool CryptoHelper::verifySignature(const std::string& publicKeyHex,
         throw CryptoError("Failed to set public key for verification");
     }
     
-    // 2. تحليل التوقيع من صيغة DER
+    // 2. Parse the signature from DER format
     const unsigned char* derSig = signature.data();
     std::unique_ptr<ECDSA_SIG, decltype(&ECDSA_SIG_free)> sig(
-        d2i_ECDSA_SIG(nullptr, &derSig, signature.size()), // d2i تعني "DER to Internal"
+        d2i_ECDSA_SIG(nullptr, &derSig, signature.size()), // d2i means "DER to Internal"
         ECDSA_SIG_free
     );
     
@@ -148,26 +148,26 @@ bool CryptoHelper::verifySignature(const std::string& publicKeyHex,
         throw CryptoError("Failed to parse signature from DER format");
     }
     
-    // 3. تجزئة الرسالة الأصلية والتحقق من التوقيع
+    // 3. Hash the original message and verify the signature
     std::vector<unsigned char> msgHash = sha256Bytes(message);
-    // ECDSA_do_verify : دالة التحقق الفعلية
+    // ECDSA_do_verify: The actual verification function
     int result = ECDSA_do_verify(msgHash.data(), msgHash.size(), sig.get(), key.get());
     
     if (result < 0) {
-        // إذا كانت النتيجة سالبة، فهناك خطأ داخلي في OpenSSL وليس فقط توقيع غير صالح
+        // If the result is negative, there is an internal error in OpenSSL, not just an invalid signature
         throw CryptoError("Signature verification error (OpenSSL internal error)");
     }
     
-    return result == 1; // 1 تعني توقيع صالح، 0 تعني توقيع غير صالح
+    return result == 1; // 1 means a valid signature, 0 means an invalid signature
 }
 
 std::string CryptoHelper::sha256(const std::string& data) {
-    // نُعيد تجزئة البايتات ونحولها إلى سلسلة سداسية عشرية
+    // We return the byte hash and convert it to a hexadecimal string
     std::vector<unsigned char> hash = sha256Bytes(data);
     
     std::stringstream ss;
     for (unsigned char byte : hash) {
-        // تنسيق البايتات لتكون رقمين سداسيين عشريين (مثلاً 0A, FF)
+        // Format the bytes to be two hexadecimal digits (e.g., 0A, FF)
         ss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(byte);
     }
     
@@ -175,10 +175,10 @@ std::string CryptoHelper::sha256(const std::string& data) {
 }
 
 std::vector<unsigned char> CryptoHelper::sha256Bytes(const std::string& data) {
-    // متجه لتخزين الهاش الناتج، بحجم طول تجزئة SHA256
+    // A vector to store the resulting hash, with the size of the SHA256 digest length
     std::vector<unsigned char> hash(SHA256_DIGEST_LENGTH);
     
-    // EVP_MD_CTX : سياق لعمليات تجزئة الرسائل (Message Digest) في OpenSSL
+    // EVP_MD_CTX: A context for Message Digest operations in OpenSSL
     std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> mdCtx(
         EVP_MD_CTX_new(), EVP_MD_CTX_free
     );
@@ -187,22 +187,22 @@ std::vector<unsigned char> CryptoHelper::sha256Bytes(const std::string& data) {
         throw CryptoError("Failed to create message digest context");
     }
     
-    // تهيئة سياق التجزئة باستخدام خوارزمية SHA256
+    // Initialize the digest context using the SHA256 algorithm
     if (EVP_DigestInit_ex(mdCtx.get(), EVP_sha256(), nullptr) != 1) {
         throw CryptoError("Failed to initialize SHA256 digest");
     }
     
-    // تحديث التجزئة بالبيانات المدخلة
+    // Update the digest with the input data
     if (EVP_DigestUpdate(mdCtx.get(), data.c_str(), data.size()) != 1) {
         throw CryptoError("Failed to update SHA256 digest with data");
     }
     
     unsigned int digestLen = 0;
-    // إنهاء عملية التجزئة والحصول على الناتج
+    // Finalize the digest operation and get the output
     if (EVP_DigestFinal_ex(mdCtx.get(), hash.data(), &digestLen) != 1) {
         throw CryptoError("Failed to finalize SHA256 digest");
     }
     
-    hash.resize(digestLen); // ضبط حجم المتجه ليتناسب مع طول الهاش الفعلي
+    hash.resize(digestLen); // Adjust the vector size to match the actual hash length
     return hash;
 }
