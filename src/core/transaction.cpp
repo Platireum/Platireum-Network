@@ -1,8 +1,9 @@
 #include "transaction.h"
-#include <algorithm>     // لاستخدام std::sort
-#include <stdexcept>     // لاستخدام std::runtime_error
+#include <algorithm>     // For std::sort
+#include <stdexcept>     // For std::runtime_error
 #include <iostream>      // For std::cerr in deserialize
-#include <limits>        // For std::numeric_limits (not directly used here, but good practice for numeric types)
+#include <limits>        // For std::numeric_limits
+#include <sstream>       // For std::stringstream
 
 // Helper functions for deserialize to parse nested JSON objects without a library
 namespace { // Anonymous namespace for local helper functions
@@ -26,38 +27,39 @@ namespace { // Anonymous namespace for local helper functions
         if (value_end == std::string::npos) return 0;
         try {
             return std::stoll(jsonSegment.substr(value_start, value_end - value_start));
-        } catch (const std::exception& e) {
+        }
+        catch (const std::exception& e) {
             std::cerr << "Error parsing numeric value for key '" << key << "' from segment: " << e.what() << std::endl;
             return 0;
         }
     }
 } // end anonymous namespace
 
-// --- تنفيذ الدوال المساعدة لـ TransactionOutput ---
+// --- Implementation of TransactionOutput helper functions ---
 
-// Constructor لإنشاء TransactionOutput
-TransactionOutput::TransactionOutput(std::string txId, int outputIndex, std::string owner, long long amount) // Changed double to long long
+// Constructor to create TransactionOutput
+TransactionOutput::TransactionOutput(std::string txId, int outputIndex, std::string owner, long long amount)
     : txId(std::move(txId)), outputIndex(outputIndex), owner(std::move(owner)), amount(amount) {
     if (this->txId.empty() || this->owner.empty() || this->amount <= 0 || this->outputIndex < 0) {
         throw TransactionError("Invalid TransactionOutput data provided.");
     }
 }
 
-// إنشاء معرف فريد لـ UTXO
+// Create unique identifier for UTXO
 std::string TransactionOutput::getId() const {
     return txId + ":" + std::to_string(outputIndex);
 }
 
-// تسلسل بيانات الخرج لأغراض حساب الهاش (للمعاملة الأم)
+// Serialize output data for transaction hash calculation
 std::string TransactionOutput::serializeForTransactionHash() const {
     std::stringstream ss;
-    ss << owner << ":" << amount; // Removed fixed and setprecision as long long is integer
+    ss << owner << ":" << amount;
     return ss.str();
 }
 
-// --- تنفيذ الدوال المساعدة لـ TransactionInput ---
+// --- Implementation of TransactionInput helper functions ---
 
-// Constructor لإنشاء TransactionInput
+// Constructor to create TransactionInput
 TransactionInput::TransactionInput(std::string utxoId, std::string signature, std::string publicKey)
     : utxoId(std::move(utxoId)), signature(std::move(signature)), publicKey(std::move(publicKey)) {
     if (this->utxoId.empty() || this->signature.empty() || this->publicKey.empty()) {
@@ -65,59 +67,80 @@ TransactionInput::TransactionInput(std::string utxoId, std::string signature, st
     }
 }
 
-// تسلسل المدخل للتوقيع (ما يقوم المرسل بتوقيعه)
+// Serialize input for signing (what the sender signs)
 std::string TransactionInput::serializeForSigning(const std::string& newTxId) const {
     return utxoId + ":" + newTxId;
 }
 
-// تسلسل المدخل لـ هاش المعاملة الجديدة
+// Serialize input for new transaction hash
 std::string TransactionInput::serializeForTransactionHash() const {
     std::stringstream ss;
     ss << utxoId << ":" << signature << ":" << publicKey;
     return ss.str();
 }
 
+// --- Implementation of Transaction class functions ---
 
-// --- تنفيذ دوال فئة Transaction ---
+// New constructor based on transaction type and payload data
+Transaction::Transaction(TransactionType txType,
+    const std::string& creatorPubKey,
+    const std::string& dataPayload,
+    const std::vector<std::string>& parents)
+    : type(txType), creatorPublicKey(creatorPubKey), payload(dataPayload), parentTxs(parents) {
+    this->timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()
+    ).count();
+    calculateId(); // Calculate ID based on transaction contents
+}
 
-// Constructor لإنشاء معاملة جديدة (معاملة لم يتم توقيع مدخلاتها بالكامل بعد)
+// Old constructor for backward compatibility (deprecated)
 Transaction::Transaction(std::vector<TransactionInput> ins,
-                         std::vector<TransactionOutput> outs,
-                         std::vector<std::string> parents)
+    std::vector<TransactionOutput> outs,
+    std::vector<std::string> parents)
     : inputs(std::move(ins)), outputs(std::move(outs)), parentTxs(std::move(parents)) {
-    
+
     timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::system_clock::now().time_since_epoch()
-                    ).count();
-    
+        std::chrono::system_clock::now().time_since_epoch()
+    ).count();
+
     createId();
 
-    // بعد حساب الـ txId، نقوم بتحديث الـ utxoId لجميع المخرجات
-    // هذا ضروري لأن معرف UTXO يعتمد على txId الخاص بالمعاملة الحالية.
+    // After calculating txId, update utxoId for all outputs
     for (int i = 0; i < this->outputs.size(); ++i) {
         this->outputs[i].txId = this->txId;
-        this->outputs[i].outputIndex = i; // نضمن أن يكون المؤشر صحيحاً
+        this->outputs[i].outputIndex = i;
     }
 }
 
-// Constructor لاستعادة معاملة موجودة (من التخزين أو الشبكة)
+// Constructor for restoring existing transaction
 Transaction::Transaction(std::vector<TransactionInput> ins,
-                         std::vector<TransactionOutput> outs,
-                         std::vector<std::string> parents,
-                         std::int64_t ts,
-                         std::string id)
+    std::vector<TransactionOutput> outs,
+    std::vector<std::string> parents,
+    std::int64_t ts,
+    std::string id)
     : inputs(std::move(ins)), outputs(std::move(outs)), parentTxs(std::move(parents)),
-      timestamp(ts), txId(std::move(id)) {
-    
+    timestamp(ts), txId(std::move(id)) {
+
     if (this->txId.empty()) {
         throw TransactionError("Restored transaction has empty ID.");
     }
-    // يمكن هنا إضافة تحقق إضافي لضمان أن الـ ID المعطى يتطابق مع الهاش المحسوب
-    // (لضمان سلامة البيانات المستعادة)
-    // if (CryptoHelper::sha256(serializeForHash()) != this->txId) { ... }
 }
 
-// دالة داخلية لحساب هاش المعاملة (معرفها)
+// New ID calculation function based on transaction contents
+void Transaction::calculateId() {
+    std::stringstream ss;
+    ss << static_cast<int>(type) << timestamp << creatorPublicKey << payload;
+
+    std::vector<std::string> sortedParents = parentTxs;
+    std::sort(sortedParents.begin(), sortedParents.end());
+    for (const auto& parent : sortedParents) {
+        ss << parent;
+    }
+
+    this->txId = CryptoHelper::sha256(ss.str());
+}
+
+// Old ID calculation function (for UTXO-based transactions)
 void Transaction::createId() {
     std::stringstream ss;
 
@@ -126,7 +149,7 @@ void Transaction::createId() {
     std::vector<TransactionInput> sortedInputs = inputs;
     std::sort(sortedInputs.begin(), sortedInputs.end(), [](const TransactionInput& a, const TransactionInput& b) {
         return a.serializeForTransactionHash() < b.serializeForTransactionHash();
-    });
+        });
     for (const auto& input : sortedInputs) {
         ss << input.serializeForTransactionHash();
     }
@@ -134,7 +157,7 @@ void Transaction::createId() {
     std::vector<TransactionOutput> sortedOutputs = outputs;
     std::sort(sortedOutputs.begin(), sortedOutputs.end(), [](const TransactionOutput& a, const TransactionOutput& b) {
         return a.serializeForTransactionHash() < b.serializeForTransactionHash();
-    });
+        });
     for (const auto& output : sortedOutputs) {
         ss << output.serializeForTransactionHash();
     }
@@ -144,21 +167,44 @@ void Transaction::createId() {
     for (const auto& parent : sortedParents) {
         ss << parent;
     }
-    
-    txId = CryptoHelper::sha256(ss.str()); // Using static CryptoHelper::sha256
+
+    txId = CryptoHelper::sha256(ss.str());
 }
 
+// Sign the transaction with private key
+void Transaction::sign(const CryptoHelper::ECKeyPtr& privateKey) {
+    std::vector<unsigned char> signatureBytes = CryptoHelper::signData(privateKey, this->txId);
+    this->signature = CryptoHelper::bytesToHex(signatureBytes);
+}
 
-// التحقق من صحة المعاملة
+// Verify the transaction signature
+bool Transaction::verifySignature() const {
+    if (creatorPublicKey.empty() || signature.empty()) {
+        return false;
+    }
+
+    std::vector<unsigned char> signatureBytes = CryptoHelper::hexToBytes(signature);
+    return CryptoHelper::verifySignature(creatorPublicKey, signatureBytes, txId);
+}
+
+// Validate transaction
 bool Transaction::validate(const std::unordered_map<std::string, TransactionOutput>& utxoSet) const {
-    // 1. التحقق من أن الـ TxId المحسوب يتطابق مع المخزن
+    // For new transaction type, verify signature first
+    if (type != TransactionType::UTXO) {
+        if (!verifySignature()) {
+            throw TransactionError("Transaction signature verification failed.");
+        }
+        return true; // Basic validation for non-UTXO transactions
+    }
+
+    // Original UTXO validation logic for backward compatibility
     std::stringstream ssCheck;
     ssCheck << timestamp;
 
     std::vector<TransactionInput> sortedInputsCheck = inputs;
     std::sort(sortedInputsCheck.begin(), sortedInputsCheck.end(), [](const TransactionInput& a, const TransactionInput& b) {
         return a.serializeForTransactionHash() < b.serializeForTransactionHash();
-    });
+        });
     for (const auto& input : sortedInputsCheck) {
         ssCheck << input.serializeForTransactionHash();
     }
@@ -166,7 +212,7 @@ bool Transaction::validate(const std::unordered_map<std::string, TransactionOutp
     std::vector<TransactionOutput> sortedOutputsCheck = outputs;
     std::sort(sortedOutputsCheck.begin(), sortedOutputsCheck.end(), [](const TransactionOutput& a, const TransactionOutput& b) {
         return a.serializeForTransactionHash() < b.serializeForTransactionHash();
-    });
+        });
     for (const auto& output : sortedOutputsCheck) {
         ssCheck << output.serializeForTransactionHash();
     }
@@ -177,30 +223,27 @@ bool Transaction::validate(const std::unordered_map<std::string, TransactionOutp
         ssCheck << parent;
     }
 
-    std::string calculatedTxId = CryptoHelper::sha256(ssCheck.str()); // Using static CryptoHelper::sha256
+    std::string calculatedTxId = CryptoHelper::sha256(ssCheck.str());
     if (calculatedTxId != txId) {
         throw TransactionError("Transaction hash mismatch. Data tampered or invalid.");
     }
 
-    // 2. التحقق من عدم وجود مدخلات أو مخرجات فارغة (مع دعم coinbase)
     if (inputs.empty() && outputs.empty()) {
         throw TransactionError("Transaction must have at least one input or one output.");
     }
-    if (inputs.empty()) { // Coinbase transaction (no inputs)
+    if (inputs.empty()) {
         if (outputs.size() != 1) {
             throw TransactionError("Coinbase transaction must have exactly one output.");
         }
         if (outputs[0].amount <= 0) {
             throw TransactionError("Coinbase output amount must be positive.");
         }
-        return true; // No inputs to validate signatures/amounts for coinbase
+        return true;
     }
     if (outputs.empty()) {
         throw TransactionError("Transaction must have at least one output.");
     }
 
-
-    // 3. التحقق من عدم صرف نفس الـ UTXO مرتين داخل نفس المعاملة (Double Spending within Tx)
     std::unordered_set<std::string> spentUtxosInThisTx;
     for (const auto& input : inputs) {
         if (spentUtxosInThisTx.count(input.utxoId)) {
@@ -209,15 +252,10 @@ bool Transaction::validate(const std::unordered_map<std::string, TransactionOutp
         spentUtxosInThisTx.insert(input.utxoId);
     }
 
-    // 4. التحقق من صحة المدخلات والتوقيعات والمبالغ
-    long long totalInputAmount = 0; // Changed double to long long
+    long long totalInputAmount = 0;
     for (const auto& input : inputs) {
         auto it = utxoSet.find(input.utxoId);
         if (it == utxoSet.end()) {
-            // هذا يعني أن الـ UTXO غير موجود أو تم صرفه بالفعل في بلوك سابق.
-            // يجب أن يتم التحقق من هذا في طبقة أعلى (TransactionDAG أو FinalityChain)
-            // لتجنب الأخطاء عند التحقق من المعاملات الجديدة في الميمبول.
-            // هنا، نرمي خطأ إذا لم يكن موجوداً في مجموعة UTXO التي تم تمريرها.
             throw TransactionError("Input UTXO not found in provided UTXO set: " + input.utxoId);
         }
         const TransactionOutput& referencedUtxo = it->second;
@@ -228,8 +266,7 @@ bool Transaction::validate(const std::unordered_map<std::string, TransactionOutp
 
         std::string messageToVerify = input.serializeForSigning(txId);
 
-        // استخدام دوال CryptoHelper الثابتة
-        std::vector<unsigned char> signatureBytes = CryptoHelper::hexToBytes(input.signature); 
+        std::vector<unsigned char> signatureBytes = CryptoHelper::hexToBytes(input.signature);
         if (!CryptoHelper::verifySignature(input.publicKey, signatureBytes, messageToVerify)) {
             throw TransactionError("Invalid signature for input UTXO: " + input.utxoId);
         }
@@ -237,8 +274,7 @@ bool Transaction::validate(const std::unordered_map<std::string, TransactionOutp
         totalInputAmount += referencedUtxo.amount;
     }
 
-    // 5. التحقق من مجموع مبالغ المخرجات
-    long long totalOutputAmount = 0; // Changed double to long long
+    long long totalOutputAmount = 0;
     for (const auto& output : outputs) {
         if (output.amount <= 0) {
             throw TransactionError("Transaction output amount must be positive.");
@@ -246,27 +282,26 @@ bool Transaction::validate(const std::unordered_map<std::string, TransactionOutp
         totalOutputAmount += output.amount;
     }
 
-    // 6. التحقق من توازن المبالغ (مجموع المدخلات >= مجموع المخرجات)
     if (totalInputAmount < totalOutputAmount) {
-        throw TransactionError("Input amount " + std::to_string(totalInputAmount) + 
-                               " is less than output amount " + std::to_string(totalOutputAmount));
+        throw TransactionError("Input amount " + std::to_string(totalInputAmount) +
+            " is less than output amount " + std::to_string(totalOutputAmount));
     }
-    
-    return true; // المعاملة صالحة
+
+    return true;
 }
 
-// دالة مساعدة لإنشاء TransactionInput موقع
+// Helper function to create signed TransactionInput
 TransactionInput Transaction::createSignedInput(
     const std::string& utxoId,
     const CryptoHelper::ECKeyPtr& privateKey,
-    const std::string& currentTxId // معرف المعاملة التي ينتمي إليها المدخل
+    const std::string& currentTxId
 ) {
-    std::string publicKeyHex = CryptoHelper::getPublicKeyHex(privateKey); // استدعاء ثابت
+    std::string publicKeyHex = CryptoHelper::getPublicKeyHex(privateKey);
 
     std::string messageToSign = utxoId + ":" + currentTxId;
 
-    std::vector<unsigned char> signatureBytes = CryptoHelper::signData(privateKey, messageToSign); // استدعاء ثابت
-    std::string signatureHex = CryptoHelper::bytesToHex(signatureBytes); // استدعاء ثابت
+    std::vector<unsigned char> signatureBytes = CryptoHelper::signData(privateKey, messageToSign);
+    std::string signatureHex = CryptoHelper::bytesToHex(signatureBytes);
 
     return TransactionInput(utxoId, signatureHex, publicKeyHex);
 }
@@ -274,8 +309,12 @@ TransactionInput Transaction::createSignedInput(
 std::string Transaction::toString() const {
     std::stringstream ss;
     ss << "TxId: " << txId.substr(0, std::min((size_t)12, txId.length())) << "...\n"
-       << "Timestamp: " << timestamp << "\n"
-       << "Parents: [";
+        << "Type: " << static_cast<int>(type) << "\n"
+        << "Timestamp: " << timestamp << "\n"
+        << "Creator: " << creatorPublicKey.substr(0, std::min((size_t)12, creatorPublicKey.length())) << "...\n"
+        << "Payload: " << payload.substr(0, std::min((size_t)20, payload.length())) << "...\n"
+        << "Signature: " << signature.substr(0, std::min((size_t)12, signature.length())) << "...\n"
+        << "Parents: [";
     bool first_parent = true;
     for (const auto& p : parentTxs) {
         if (!first_parent) ss << ", ";
@@ -283,7 +322,7 @@ std::string Transaction::toString() const {
         first_parent = false;
     }
     ss << "]\n"
-       << "  Inputs (" << inputs.size() << "):\n";
+        << "  Inputs (" << inputs.size() << "):\n";
     for (const auto& input : inputs) {
         ss << "    - UTXO: " << input.utxoId << ", Public Key: " << input.publicKey.substr(0, std::min((size_t)12, input.publicKey.length())) << "..., Signature: " << input.signature.substr(0, std::min((size_t)12, input.signature.length())) << "...\n";
     }
@@ -294,9 +333,9 @@ std::string Transaction::toString() const {
     return ss.str();
 }
 
+// New serialize function for the updated transaction structure
 std::string Transaction::serialize() const {
-    // للتصغير والتبسيط، نستخدم تجميع السلاسل لـ JSON.
-    // يوصى بشدة باستخدام مكتبة JSON مناسبة (مثل nlohmann/json) للتطبيقات الحقيقية.
+    // Build JSON string with new fields: type, creatorPublicKey, payload, signature
     std::string inputs_json = "[";
     bool first_input = true;
     for (const auto& input : inputs) {
@@ -304,8 +343,8 @@ std::string Transaction::serialize() const {
             inputs_json += ",";
         }
         inputs_json += "{\"utxoId\":\"" + input.utxoId + "\","
-                       "\"signature\":\"" + input.signature + "\","
-                       "\"publicKey\":\"" + input.publicKey + "\"}";
+            "\"signature\":\"" + input.signature + "\","
+            "\"publicKey\":\"" + input.publicKey + "\"}";
         first_input = false;
     }
     inputs_json += "]";
@@ -317,9 +356,9 @@ std::string Transaction::serialize() const {
             outputs_json += ",";
         }
         outputs_json += "{\"txId\":\"" + output.txId + "\","
-                        "\"outputIndex\":" + std::to_string(output.outputIndex) + ","
-                        "\"owner\":\"" + output.owner + "\","
-                        "\"amount\":" + std::to_string(output.amount) + "}";
+            "\"outputIndex\":" + std::to_string(output.outputIndex) + ","
+            "\"owner\":\"" + output.owner + "\","
+            "\"amount\":" + std::to_string(output.amount) + "}";
         first_output = false;
     }
     outputs_json += "]";
@@ -330,68 +369,75 @@ std::string Transaction::serialize() const {
         if (!first_parent) {
             parents_json += ",";
         }
-        parents_json += "\"" + parent + "\""; // هاش الأب هو سلسلة نصية
+        parents_json += "\"" + parent + "\"";
         first_parent = false;
     }
     parents_json += "]";
 
     std::stringstream ss;
     ss << "{"
-       << "\"txId\":\"" << txId << "\","
-       << "\"timestamp\":" << timestamp << ","
-       << "\"inputs\":" << inputs_json << ","
-       << "\"outputs\":" << outputs_json << ","
-       << "\"parentTxs\":" << parents_json
-       << "}";
+        << "\"txId\":\"" << txId << "\","
+        << "\"type\":" << static_cast<int>(type) << ","
+        << "\"timestamp\":" << timestamp << ","
+        << "\"creatorPublicKey\":\"" << creatorPublicKey << "\","
+        << "\"payload\":\"" << payload << "\","
+        << "\"signature\":\"" << signature << "\","
+        << "\"inputs\":" << inputs_json << ","
+        << "\"outputs\":" << outputs_json << ","
+        << "\"parentTxs\":" << parents_json
+        << "}";
     return ss.str();
 }
 
 std::shared_ptr<Transaction> Transaction::deserialize(const std::string& jsonString) {
-    // هذا محلل JSON بدائي جداً.
-    // في تطبيق حقيقي، استخدم مكتبة JSON قوية (مثل nlohmann/json).
-    // هذا التنفيذ يفترض بنية JSON محددة وبسيطة وقد يفشل في حالة الإدخال غير الصحيح.
-
     std::string txId_val;
+    TransactionType type_val = TransactionType::UTXO;
     std::int64_t timestamp_val = 0;
+    std::string creatorPublicKey_val;
+    std::string payload_val;
+    std::string signature_val;
     std::vector<TransactionInput> inputs_val;
     std::vector<TransactionOutput> outputs_val;
     std::vector<std::string> parentTxs_val;
 
-    // استخراج قيمة حقل "txId"
+    // Extract basic fields
     txId_val = extract_string_value_local(jsonString, "txId");
-    // استخراج قيمة حقل "timestamp"
+    type_val = static_cast<TransactionType>(extract_numeric_value_local(jsonString, "type"));
     timestamp_val = extract_numeric_value_local(jsonString, "timestamp");
+    creatorPublicKey_val = extract_string_value_local(jsonString, "creatorPublicKey");
+    payload_val = extract_string_value_local(jsonString, "payload");
+    signature_val = extract_string_value_local(jsonString, "signature");
 
-    // استخراج وتحليل مصفوفة المدخلات "inputs"
+    // Extract and parse inputs array
     size_t inputs_array_start = jsonString.find("\"inputs\":[");
     if (inputs_array_start != std::string::npos) {
-        inputs_array_start += std::string("\"inputs\":").length(); // تقدم إلى بداية المصفوفة
+        inputs_array_start += std::string("\"inputs\":").length();
         size_t inputs_array_end = jsonString.find("]", inputs_array_start);
         if (inputs_array_end != std::string::npos) {
             std::string inputs_segment = jsonString.substr(inputs_array_start, inputs_array_end - inputs_array_start);
             size_t current_pos = 0;
-            // تكرار استخراج كائنات المدخلات الفردية
             while ((current_pos = inputs_segment.find("{", current_pos)) != std::string::npos) {
                 size_t input_end = inputs_segment.find("}", current_pos);
                 if (input_end != std::string::npos) {
                     std::string single_input_json = inputs_segment.substr(current_pos, input_end - current_pos + 1);
-                    
+
                     std::string utxoId = extract_string_value_local(single_input_json, "utxoId");
                     std::string signature = extract_string_value_local(single_input_json, "signature");
                     std::string publicKey = extract_string_value_local(single_input_json, "publicKey");
-                    
+
                     if (!utxoId.empty() && !signature.empty() && !publicKey.empty()) {
                         inputs_val.emplace_back(utxoId, signature, publicKey);
                     }
                     current_pos = input_end + 1;
-                } else {
-                    break; // JSON مكسور
+                }
+                else {
+                    break;
                 }
             }
         }
     }
 
-    // استخراج وتحليل مصفوفة المخرجات "outputs"
+    // Extract and parse outputs array
     size_t outputs_array_start = jsonString.find("\"outputs\":[");
     if (outputs_array_start != std::string::npos) {
         outputs_array_start += std::string("\"outputs\":").length();
@@ -403,24 +449,25 @@ std::shared_ptr<Transaction> Transaction::deserialize(const std::string& jsonStr
                 size_t output_end = outputs_segment.find("}", current_pos);
                 if (output_end != std::string::npos) {
                     std::string single_output_json = outputs_segment.substr(current_pos, output_end - current_pos + 1);
-                    
+
                     std::string txId_out = extract_string_value_local(single_output_json, "txId");
                     long long outputIndex_out = extract_numeric_value_local(single_output_json, "outputIndex");
                     std::string owner_out = extract_string_value_local(single_output_json, "owner");
                     long long amount_out = extract_numeric_value_local(single_output_json, "amount");
 
-                    if (!owner_out.empty() && amount_out >= 0) { // Check minimal validity. Amount can be 0 for some specific cases (e.g. smart contracts with no value transfer)
+                    if (!owner_out.empty() && amount_out >= 0) {
                         outputs_val.emplace_back(txId_out, (int)outputIndex_out, owner_out, amount_out);
                     }
                     current_pos = output_end + 1;
-                } else {
+                }
+                else {
                     break;
                 }
             }
         }
     }
 
-    // استخراج وتحليل مصفوفة المعاملات الأب "parentTxs"
+    // Extract and parse parent transactions array
     size_t parents_array_start = jsonString.find("\"parentTxs\":[");
     if (parents_array_start != std::string::npos) {
         parents_array_start += std::string("\"parentTxs\":").length();
@@ -433,22 +480,29 @@ std::shared_ptr<Transaction> Transaction::deserialize(const std::string& jsonStr
                 if (parent_end != std::string::npos) {
                     parentTxs_val.push_back(parents_segment.substr(current_pos + 1, parent_end - (current_pos + 1)));
                     current_pos = parent_end + 1;
-                } else {
+                }
+                else {
                     break;
                 }
             }
         }
     }
-    
-    // إنشاء وإرجاع كائن المعاملة
-    std::shared_ptr<Transaction> tx = std::make_shared<Transaction>(inputs_val, outputs_val, parentTxs_val, timestamp_val, txId_val);
-    
-    // اختياري: أعد حساب الهاش للتحقق من سلامة البيانات
-    // بما أننا مررنا الـ txId إلى الكونستراكتور الثاني، فإننا نفترض أنه الهاش الصحيح.
-    // إذا كنت ترغب في التحقق، يجب أن تقوم بذلك يدوياً هنا بعد إنشاء الكائن.
-    // if (tx->getId() != txId_val) {
-    //    std::cerr << "Warning: Deserialized transaction ID mismatch for txId: " << txId_val << std::endl;
-    // }
+
+    // Create transaction object based on type
+    std::shared_ptr<Transaction> tx;
+    if (type_val == TransactionType::UTXO) {
+        // Use old constructor for UTXO transactions
+        tx = std::make_shared<Transaction>(inputs_val, outputs_val, parentTxs_val, timestamp_val, txId_val);
+    }
+    else {
+        // Use new constructor for other transaction types
+        tx = std::make_shared<Transaction>(type_val, creatorPublicKey_val, payload_val, parentTxs_val);
+        tx->timestamp = timestamp_val;
+        tx->txId = txId_val;
+        tx->signature = signature_val;
+        tx->inputs = inputs_val;
+        tx->outputs = outputs_val;
+    }
 
     return tx;
 }
