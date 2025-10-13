@@ -3,13 +3,13 @@
 
 #include <string>
 #include <vector>
-#include <unordered_map> // لتخزين معلومات المدققين وحصصهم
-#include <random>        // لاختيار المدققين عشوائياً بناءً على الحصة
-#include <chrono>        // للاستخدام في تهيئة مولد الأرقام العشوائية
+#include <unordered_map> // For storing validator information and their stakes
+#include <random>        // For randomly selecting validators based on stake
+#include <chrono>        // For use in initializing the random number generator
 #include <memory>        // For std::shared_ptr for EC_KEY
 #include <stdexcept>     // For std::runtime_error
 
-#include "crypto_helper.h" // نحتاج إلى دوال التشفير للمفاتيح العامة
+#include "crypto_helper.h" // We need crypto functions for public keys
 
 // ---------------------------
 // 0. Error Handling
@@ -31,11 +31,11 @@ public:
  * Stores their public key (ID) and their staked amount.
  */
 struct Validator {
-    std::string publicKey;  // المفتاح العام للمدقق (كمعرف فريد له)
-    double stake;           // مقدار العملة التي تم وضعها كحصة (للمشاركة في الإجماع)
-    // يمكن إضافة حقول أخرى مثل:
-    // int consecutiveBlocksProposed; // عدد الكتل المتتالية التي اقترحها (لتحسين العدالة)
-    // std::int64_t lastProposedTime; // آخر مرة اقترح فيها المدقق كتلة
+    std::string publicKey;  // The validator's public key (as its unique identifier)
+    double stake;           // The amount of currency staked (for consensus participation)
+    // Other fields can be added, such as:
+    // int consecutiveBlocksProposed; // Number of consecutive blocks proposed (to improve fairness)
+    // std::int64_t lastProposedTime; // Last time the validator proposed a block
 
     Validator(std::string pk, double s) : publicKey(std::move(pk)), stake(s) {}
 };
@@ -46,14 +46,14 @@ struct Validator {
  */
 class ValidatorManager {
 private:
-    // تخزين المدققين النشطين (المفتاح العام -> كائن Validator)
+    // Stores active validators (public key -> Validator object)
     std::unordered_map<std::string, Validator> activeValidators;
     
-    // مجموع الحصص الكلي لجميع المدققين النشطين
+    // The total stake of all active validators
     double totalStake;
 
-    // مولد الأرقام العشوائية للاختيار القائم على الحصة
-    mutable std::mt19937 rng; // mutable للسماح لدوال const بتغييرها (مثل pickValidator)
+    // Random number generator for stake-based selection
+    mutable std::mt19937 rng; // mutable to allow const functions to change it (like pickValidator)
 
 public:
     // Constructor
