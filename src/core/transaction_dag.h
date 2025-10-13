@@ -3,20 +3,20 @@
 
 #include <string>
 #include <vector>
-#include <unordered_map> // لتخزين المعاملات بواسطة الهاش الخاص بها
-#include <unordered_set> // لتتبع المعاملات "الطرفية" (tips)
-#include <memory>        // لاستخدام std::shared_ptr للمعاملات
-#include <algorithm>     // لعمليات الفرز والبحث
-#include <stdexcept>     // لاستخدام std::runtime_error
+#include <unordered_map> // Used for storing transactions by their hash and for reputation scores
+#include <unordered_set> // Used for tracking "tips"
+#include <memory>        // Used for std::shared_ptr for transactions
+#include <algorithm>     // Used for sorting and searching algorithms
+#include <stdexcept>     // Used for std::runtime_error
 #include <mutex>         // For std::mutex to protect shared data
 
-#include "transaction.h" // نحتاج لتعريف فئة Transaction
+#include "transaction.h" // We need the definition of the Transaction class
 
 // ---------------------------
-// 0. Error Handling (يمكن تعريفها هنا أو في ملف منفصل للأخطاء العامة)
+// 0. Error Handling (can be defined here or in a separate general errors file)
 // ---------------------------
 /**
- * Custom exception class for DAG-specific errors
+ * @brief Custom exception class for DAG-specific errors.
  */
 class DAGError : public std::runtime_error {
 public:
@@ -28,26 +28,26 @@ public:
 // ---------------------------
 
 /**
- * Manages the Directed Acyclic Graph (DAG) of unconfirmed transactions.
+ * @brief Manages the Directed Acyclic Graph (DAG) of unconfirmed transactions.
  * Stores transactions and tracks their relationships (parents, children)
  * before they are confirmed and included in the main blockchain.
  */
 class TransactionDAG {
 private:
-    // تخزين جميع المعاملات في الـ DAG بواسطة معرفها (هاش المعاملة)
+    // Store all transactions in the DAG by their ID (transaction hash)
     std::unordered_map<std::string, std::shared_ptr<Transaction>> transactions;
-    
-    // تتبع المعاملات "الطرفية" (tips) - وهي المعاملات التي لم يتم الإشارة إليها كـ "أب" بعد
-    // هذه هي المعاملات التي يمكن أن تشير إليها المعاملات الجديدة.
+
+    // Track "tips" - transactions that have not yet been referenced as a parent.
+    // These are the transactions that new transactions can reference.
     std::unordered_set<std::string> tips;
 
-    // تتبع العلاقات بين المعاملات (الأب -> الأبناء)
-    std::unordered_map<std::string, std::unordered_set<std::string>> childrenMap; // parent_tx_id -> set of child_tx_ids (using set for faster removal)
+    // Track relationships from parent to children
+    std::unordered_map<std::string, std::unordered_set<std::string>> childrenMap; // parent_tx_id -> set of child_tx_ids
 
-    // تتبع العلاقات بين المعاملات (الابن -> الآباء)
+    // Track relationships from child to parents
     std::unordered_map<std::string, std::unordered_set<std::string>> parentMap; // child_tx_id -> set of parent_tx_ids
 
-    // Mutex لحماية البيانات المشتركة في بيئة متعددة الخيوط
+    // Mutex for protecting shared data in a multi-threaded environment
     mutable std::mutex dagMutex; // mutable allows locking in const methods if needed
 
 
@@ -64,7 +64,7 @@ private:
      * @brief Helper to ensure that parent transactions actually exist in the DAG.
      * @param parentTxIds The IDs of the parent transactions.
      * @return True if all parents exist, false otherwise.
-     * @throws DAGError if any parent transaction is not found and the DAG is not empty.
+     * @throws DAGError if any parent transaction is not found.
      */
     bool validateParentExistence(const std::vector<std::string>& parentTxIds) const;
 
@@ -74,16 +74,14 @@ public:
 
     /**
      * @brief Adds a new transaction to the DAG.
-     * Performs basic validation and updates the DAG structure (transactions map, tips).
-     * The transaction's internal validity (signatures, amounts) is checked
-     * against the provided UTXO set.
+     * Performs validation and updates the DAG structure (transactions map, tips).
      * @param tx A shared_ptr to the Transaction to add.
      * @param currentUtxoSet The current global UTXO set for transaction validation.
      * @throws DAGError if the transaction is invalid or already exists, or if parents are invalid.
      * @throws TransactionError if the transaction fails its internal validation.
      */
     void addTransaction(std::shared_ptr<Transaction> tx,
-                        const std::unordered_map<std::string, TransactionOutput>& currentUtxoSet);
+        const std::unordered_map<std::string, TransactionOutput>& currentUtxoSet);
 
     /**
      * @brief Retrieves a transaction from the DAG by its ID.
@@ -131,14 +129,19 @@ public:
     void clear();
 
     /**
-     * @brief Selects a set of transactions from the DAG that can be included in a new block.
-     * This typically involves selecting transactions whose all parents are either already
-     * confirmed or present within the current DAG (and thus will be confirmed with the block).
-     * This method might also prioritize transactions (e.g., by fee or age).
+     * @brief Selects a set of transactions from the DAG for processing (e.g., to include in a new block).
+     * This method is updated to accept reputation scores to allow for more sophisticated
+     * transaction selection logic. For example, transactions from nodes with higher reputation
+     * might be prioritized. The implementation of how these scores are used would be in the .cpp file.
+     *
      * @param maxTransactions The maximum number of transactions to return.
-     * @return A vector of shared_ptr to transactions suitable for block inclusion.
+     * @param reputationScores A map where the key is an identifier (e.g., node ID) and the value is its reputation score.
+     * This data is passed from an external context (like the Node class) to influence transaction selection.
+     * @return A vector of shared_ptr to transactions suitable for processing.
      */
-    std::vector<std::shared_ptr<Transaction>> getTransactionsToProcess(size_t maxTransactions = 100) const;
+    std::vector<std::shared_ptr<Transaction>> getTransactionsToProcess(
+        size_t maxTransactions,
+        const std::unordered_map<std::string, double>& reputationScores) const;
 
     // Debugging/Utility methods (useful during development)
     void printDAGStatus() const;
