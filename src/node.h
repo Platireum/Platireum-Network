@@ -5,12 +5,13 @@
 #include <vector>
 #include <memory>
 #include <unordered_map>
+#include <algorithm> // Required for min/max/clamp if specific reputation logic is implemented
 
 // Core components
 #include "core/finality_chain.h" // For Block and FinalityChain
 #include "core/transaction_dag.h" // For TransactionDAG
-#include "core/transaction.h"     // For Transaction
-#include "core/key_generator.h"   // For KeyGenerator
+#include "core/transaction.h"    // For Transaction
+#include "core/key_generator.h"  // For KeyGenerator
 #include "storage/storage_manager.h" // For StorageManager
 
 // Smart Contract components
@@ -47,6 +48,14 @@ private:
     // A simple UTXO set managed by the Node/FinalityChain (or derived from it)
     std::unordered_map<std::string, double> utxoSet; // Simplified: PublicKey -> Balance
 
+    // --- Reputation System Integration (NEW) ---
+    /**
+     * @brief Stores the reputation score for other nodes.
+     * Key: Node ID (std::string), Value: Reputation Score (double, e.g., 0.0 to 1.0).
+     * Each node maintains its own view of other nodes' reputations.
+     */
+    std::unordered_map<std::string, double> reputationScores;
+
     // Private helper for internal logging
     void log(const std::string& message) const;
 
@@ -73,12 +82,30 @@ private:
      * @param isCredit True if funds are being added, false if debited.
      */
     void updateUtxoSet(std::shared_ptr<Transaction> tx);
-    
+
     /**
      * @brief Registers VM callbacks with the VMEngine.
      * This connects VM operations (like fund transfers) to Node's internal state.
      */
     void registerVmCallbacks();
+
+    // --- Reputation Management Methods (NEW) ---
+
+    /**
+     * @brief Rewards a node by increasing its reputation score.
+     * This is typically called upon successful, verified participation.
+     * @param nodeId The ID of the node to reward.
+     * @param points The amount of points to add to the score.
+     */
+    void rewardNode(const std::string& nodeId, double points);
+
+    /**
+     * @brief Penalizes a node by decreasing its reputation score.
+     * This is typically called when a node exhibits malicious or incorrect behavior.
+     * @param nodeId The ID of the node to penalize.
+     * @param points The amount of points to subtract from the score.
+     */
+    void penalizeNode(const std::string& nodeId, double points);
 
 
 public:
@@ -154,7 +181,7 @@ public:
      * @return The balance of the account.
      */
     double getAccountBalance(const std::string& accountId) const;
-    
+
     /**
      * @brief Get the count of UTXOs in the current set.
      * @return The number of UTXOs.
@@ -186,9 +213,9 @@ public:
      * @return The result string from contract execution.
      */
     std::string callContract(const std::string& contractId,
-                             const std::string& senderId,
-                             const std::string& methodName,
-                             const std::string& paramsJson);
+        const std::string& senderId,
+        const std::string& methodName,
+        const std::string& paramsJson);
 
     /**
      * @brief Gets the number of deployed smart contracts.
@@ -205,6 +232,16 @@ public:
      * @param amount The amount to transfer.
      */
     void handleVmFundTransfer(const std::string& senderId, const std::string& recipientId, double amount);
+
+    // --- Public Reputation Interface (NEW) ---
+
+    /**
+     * @brief Retrieves the current reputation score of a specific node.
+     * If the node is not tracked, it returns a default (e.g., neutral) score.
+     * @param nodeId The ID of the peer node whose reputation is sought.
+     * @return The reputation score (double).
+     */
+    double getNodeReputation(const std::string& nodeId) const;
 };
 
 #endif // NODE_H
