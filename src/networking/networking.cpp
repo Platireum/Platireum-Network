@@ -1,23 +1,23 @@
 #include "networking.h"
-#include "transaction.h" // نحتاج لتعريف المعاملة لفك تسلسلها
-#include "finality_chain.h" // نحتاج لتعريف Block لفك تسلسله
-#include <iostream>      // للتسجيل (logging)
-#include <algorithm>     // لـ std::find_if (إذا احتجنا للبحث في قائمة الأقران)
+#include "transaction.h" // We need the Transaction definition to deserialize it
+#include "finality_chain.h" // We need the Block definition to deserialize it
+#include <iostream>      // For logging
+#include <algorithm>     // For std::find_if (if we need to search the peer list)
 
-// --- تنفيذ دوال فئة Networking ---
+// --- Networking class function implementations ---
 
 // Constructor
 Networking::Networking(const std::string& id) : nodeId(id) {
-    // يمكن إضافة تهيئة أخرى هنا إذا لزم الأمر
+    // Other initializations can be added here if necessary
 }
 
-// تهيئة طبقة الشبكة بمراجع إلى واجهات الشبكة الأخرى
+// Initialize the network layer with references to other network interfaces
 void Networking::initialize(std::shared_ptr<std::unordered_map<std::string, std::shared_ptr<Networking>>> networkInterfaces) {
     this->allNetworkInterfaces = networkInterfaces;
     // std::cout << "[Networking " << nodeId << "] Initialized with " << networkInterfaces->size() << " peers." << std::endl;
 }
 
-// محاكاة إرسال رسالة إلى نظير محدد
+// Simulate sending a message to a specific peer
 void Networking::sendMessage(const std::string& recipientId, const NetworkMessage& message) {
     if (!allNetworkInterfaces) {
         // std::cerr << "[Networking " << nodeId << "] Error: Network interfaces not initialized." << std::endl;
@@ -26,52 +26,52 @@ void Networking::sendMessage(const std::string& recipientId, const NetworkMessag
 
     auto it = allNetworkInterfaces->find(recipientId);
     if (it != allNetworkInterfaces->end()) {
-        // إذا كان المستلم موجوداً، نُضيف الرسالة إلى قائمة انتظاره
+        // If the recipient exists, add the message to their queue
         it->second->enqueueMessage(message);
-        // std::cout << "[Networking " << nodeId << "] Sent " << (int)message.type 
+        // std::cout << "[Networking " << nodeId << "] Sent " << (int)message.type
         //           << " message to " << recipientId << std::endl;
     } else {
-        // std::cerr << "[Networking " << nodeId << "] Warning: Recipient " << recipientId 
+        // std::cerr << "[Networking " << nodeId << "] Warning: Recipient " << recipientId
         //           << " not found in network interfaces. Message not sent." << std::endl;
     }
 }
 
-// محاكاة بث رسالة إلى جميع النظراء المتصلين (باستثناء المرسل)
+// Simulate broadcasting a message to all connected peers (except the sender)
 void Networking::broadcastMessage(const NetworkMessage& message) {
     if (!allNetworkInterfaces) {
         // std::cerr << "[Networking " << nodeId << "] Error: Network interfaces not initialized for broadcast." << std::endl;
         return;
     }
 
-    // std::cout << "[Networking " << nodeId << "] Broadcasting " << (int)message.type 
+    // std::cout << "[Networking " << nodeId << "] Broadcasting " << (int)message.type
     //           << " message from " << message.senderId << std::endl;
               
     for (const auto& pair : *allNetworkInterfaces) {
-        // لا ترسل الرسالة إلى العقدة التي أرسلتها (أو العقدة التي تنتمي إليها طبقة الشبكة هذه)
-        if (pair.first != message.senderId) { // استخدم senderId من الرسالة لتجنب الحلقات
+        // Don't send the message back to the node that sent it (or the node this networking layer belongs to)
+        if (pair.first != message.senderId) { // Use senderId from the message to avoid loops
             pair.second->enqueueMessage(message);
         }
     }
 }
 
-// إضافة رسالة إلى قائمة انتظار الرسائل الواردة
+// Add a message to the incoming message queue
 void Networking::enqueueMessage(const NetworkMessage& message) {
     std::lock_guard<std::mutex> lock(queueMutex);
     incomingMessageQueue.push(message);
-    // std::cout << "[Networking " << nodeId << "] Enqueued message. Queue size: " 
+    // std::cout << "[Networking " << nodeId << "] Enqueued message. Queue size: "
     //           << incomingMessageQueue.size() << std::endl;
 }
 
-// معالجة رسالة واحدة من قائمة الانتظار
+// Process a single message from the queue
 void Networking::processSingleMessage(const NetworkMessage& message) {
-    // std::cout << "[Networking " << nodeId << "] Processing message type: " << (int)message.type 
+    // std::cout << "[Networking " << nodeId << "] Processing message type: " << (int)message.type
     //           << " from: " << message.senderId << std::endl;
 
     switch (message.type) {
         case MessageType::TRANSACTION_BROADCAST: {
             if (onReceiveTransactionCallback) {
                 try {
-                    // فك تسلسل (deserialize) حمولة الرسالة إلى كائن Transaction
+                    // Deserialize the message payload into a Transaction object
                     std::shared_ptr<Transaction> tx = Transaction::deserialize(message.payload);
                     onReceiveTransactionCallback(tx);
                 } catch (const std::exception& e) {
@@ -85,7 +85,7 @@ void Networking::processSingleMessage(const NetworkMessage& message) {
         case MessageType::BLOCK_BROADCAST: {
             if (onReceiveBlockCallback) {
                 try {
-                    // فك تسلسل (deserialize) حمولة الرسالة إلى كائن Block
+                    // Deserialize the message payload into a Block object
                     std::shared_ptr<Block> block = Block::deserialize(message.payload);
                     onReceiveBlockCallback(block);
                 } catch (const std::exception& e) {
@@ -96,7 +96,7 @@ void Networking::processSingleMessage(const NetworkMessage& message) {
             }
             break;
         }
-        // يمكن إضافة حالات أخرى لأنواع الرسائل هنا
+        // Other cases for message types can be added here
         // case MessageType::REQUEST_BLOCK:
         // case MessageType::REQUEST_TRANSACTION:
         // case MessageType::PEER_DISCOVERY:
@@ -108,9 +108,9 @@ void Networking::processSingleMessage(const NetworkMessage& message) {
     }
 }
 
-// معالجة جميع الرسائل المعلقة في قائمة الانتظار الواردة
+// Process all pending messages in the incoming queue
 void Networking::processIncomingMessages() {
-    std::lock_guard<std::mutex> lock(queueMutex); // حماية قائمة الانتظار أثناء المعالجة
+    std::lock_guard<std::mutex> lock(queueMutex); // Lock the queue during processing
 
     while (!incomingMessageQueue.empty()) {
         NetworkMessage message = incomingMessageQueue.front();
@@ -119,18 +119,18 @@ void Networking::processIncomingMessages() {
     }
 }
 
-// جلب عدد الرسائل في قائمة الانتظار الواردة
+// Get the number of messages in the incoming queue
 size_t Networking::getIncomingQueueSize() const {
     std::lock_guard<std::mutex> lock(queueMutex);
     return incomingMessageQueue.size();
 }
 
-// مسح الحالة الداخلية
+// Clear the internal state
 void Networking::clear() {
     std::lock_guard<std::mutex> lock(queueMutex);
     while (!incomingMessageQueue.empty()) {
         incomingMessageQueue.pop();
     }
-    allNetworkInterfaces = nullptr; // إزالة مرجع الشبكة
+    allNetworkInterfaces = nullptr; // Remove the network reference
     // std::cout << "[Networking " << nodeId << "] Cleared internal state." << std::endl;
 }
