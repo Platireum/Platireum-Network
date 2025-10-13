@@ -5,6 +5,7 @@
 #include <filesystem>   // For std::filesystem::create_directories, exists, remove (C++17)
 #include <stdexcept>    // For std::runtime_error
 #include <string>
+#include <memory>       // For std::make_unique
 
 // Include necessary headers from core for serialization/deserialization
 #include "../../src/core/transaction.h" // For Transaction::serialize/deserialize
@@ -12,12 +13,19 @@
 
 namespace fs = std::filesystem; // Alias for easier use of filesystem library
 
-// --- تنفيذ دوال فئة StorageManager ---
+// --- Implementation of StorageManager class methods ---
 
-// Constructor
-StorageManager::StorageManager(const std::string& dir) : dataDirectory(dir) {
-    // Constructor primarily sets the data directory path.
-    // Initialization (e.g., directory creation) happens in initialize().
+// Constructor with IPFS connection initialization
+StorageManager::StorageManager(const std::string& dir, const std::string& ipfsApiAddress)
+    : dataDirectory(dir) {
+    try {
+        // Initialize the IPFS client connection
+        ipfsClient = std::make_unique<ipfs::Client>(ipfsApiAddress);
+        log("IPFS client connected to " + ipfsApiAddress);
+    }
+    catch (const std::exception& e) {
+        throw StorageError("Failed to connect to IPFS daemon: " + std::string(e.what()));
+    }
 }
 
 // Simple logging utility for StorageManager
@@ -61,12 +69,43 @@ void StorageManager::initialize() {
             log("Created transactions directory: " + dataDirectory + "/transactions");
         }
         log("StorageManager initialized successfully. Data path: " + dataDirectory);
-    } catch (const fs::filesystem_error& e) {
+    }
+    catch (const fs::filesystem_error& e) {
         throw StorageError("Failed to initialize storage directories: " + std::string(e.what()));
     }
 }
 
----
+// --- IPFS Data Storage & Retrieval ---
+
+std::string StorageManager::saveDataBlob(const std::vector<char>& dataBlob) {
+    try {
+        // Call the 'Add' function from IPFS library to upload data
+        ipfs::Json result = ipfsClient->Add(dataBlob);
+        std::string cid = result["Hash"]; // Extract CID from response
+        log("Saved data blob to IPFS. CID: " + cid);
+        return cid;
+    }
+    catch (const std::exception& e) {
+        throw StorageError("Failed to save data to IPFS: " + std::string(e.what()));
+    }
+}
+
+std::vector<char> StorageManager::loadDataBlob(const std::string& cid) {
+    try {
+        // Call the 'Cat' function (or equivalent) to retrieve data
+        std::stringstream dataStream;
+        ipfsClient->Cat(cid, &dataStream);
+
+        // Convert data from stream to vector<char>
+        std::string dataStr = dataStream.str();
+        return std::vector<char>(dataStr.begin(), dataStr.end());
+    }
+    catch (const std::exception& e) {
+        throw StorageError("Failed to load data from IPFS for CID " + cid + ": " + std::string(e.what()));
+    }
+}
+
+-- -
 
 ### Block Storage & Retrieval
 
@@ -83,7 +122,8 @@ void StorageManager::saveBlock(std::shared_ptr<Block> block) {
         outFile << block->serialize(); // Serialize the block to a string and write
         outFile.close();
         // log("Saved block: " + block->getHash().substr(0, 8) + "...");
-    } catch (const std::exception& e) {
+    }
+    catch (const std::exception& e) {
         throw StorageError("Error saving block " + block->getHash().substr(0, 8) + "...: " + std::string(e.what()));
     }
 }
@@ -103,7 +143,8 @@ std::shared_ptr<Block> StorageManager::loadBlock(const std::string& blockHash) {
         buffer << inFile.rdbuf(); // Read entire file content
         inFile.close();
         return Block::deserialize(buffer.str()); // Deserialize the string content
-    } catch (const std::exception& e) {
+    }
+    catch (const std::exception& e) {
         throw StorageError("Error loading block " + blockHash.substr(0, 8) + "...: " + std::string(e.what()));
     }
 }
@@ -112,7 +153,7 @@ bool StorageManager::hasBlock(const std::string& blockHash) const {
     return fs::exists(getBlockFilePath(blockHash));
 }
 
----
+-- -
 
 ### Transaction Storage & Retrieval
 
@@ -129,7 +170,8 @@ void StorageManager::saveTransaction(std::shared_ptr<Transaction> tx) {
         outFile << tx->serialize(); // Serialize the transaction to a string and write
         outFile.close();
         // log("Saved transaction: " + tx->getId().substr(0, 8) + "...");
-    } catch (const std::exception& e) {
+    }
+    catch (const std::exception& e) {
         throw StorageError("Error saving transaction " + tx->getId().substr(0, 8) + "...: " + std::string(e.what()));
     }
 }
@@ -149,7 +191,8 @@ std::shared_ptr<Transaction> StorageManager::loadTransaction(const std::string& 
         buffer << inFile.rdbuf(); // Read entire file content
         inFile.close();
         return Transaction::deserialize(buffer.str()); // Deserialize the string content
-    } catch (const std::exception& e) {
+    }
+    catch (const std::exception& e) {
         throw StorageError("Error loading transaction " + txId.substr(0, 8) + "...: " + std::string(e.what()));
     }
 }
@@ -158,12 +201,12 @@ bool StorageManager::hasTransaction(const std::string& txId) const {
     return fs::exists(getTransactionFilePath(txId));
 }
 
----
+-- -
 
-### State Storage & Retrieval (UTXO Set, Chain Tip)
+### State Storage & Retrieval(UTXO Set, Chain Tip)
 
 // Helper to serialize UTXO set (simple JSON-like string)
-std::string serializeUtxoSet(const std::unordered_map<std::string, TransactionOutput>& utxos) {
+std::string serializeUtxoSet(const std::unordered_map<std::string, TransactionOutput>&utxos) {
     std::string serializedData = "{";
     bool first = true;
     for (const auto& pair : utxos) {
@@ -187,7 +230,7 @@ std::unordered_map<std::string, TransactionOutput> deserializeUtxoSet(const std:
 
     std::stringstream ss(inner_data);
     std::string segment;
-    while(std::getline(ss, segment, ',')) {
+    while (std::getline(ss, segment, ',')) {
         size_t colon_pos = segment.find(':');
         if (colon_pos == std::string::npos) continue;
 
@@ -201,7 +244,8 @@ std::unordered_map<std::string, TransactionOutput> deserializeUtxoSet(const std:
         try {
             TransactionOutput utxo_output = TransactionOutput::deserialize(value_str);
             utxos[utxo_output.getId()] = utxo_output;
-        } catch (const std::exception& e) {
+        }
+        catch (const std::exception& e) {
             throw StorageError("Error deserializing UTXO entry: " + std::string(e.what()));
         }
     }
@@ -218,7 +262,8 @@ void StorageManager::saveUtxoSet(const std::unordered_map<std::string, Transacti
         outFile << serializeUtxoSet(utxos);
         outFile.close();
         // log("Saved UTXO set with " + std::to_string(utxos.size()) + " entries.");
-    } catch (const std::exception& e) {
+    }
+    catch (const std::exception& e) {
         throw StorageError("Error saving UTXO set: " + std::string(e.what()));
     }
 }
@@ -238,7 +283,8 @@ std::unordered_map<std::string, TransactionOutput> StorageManager::loadUtxoSet()
         buffer << inFile.rdbuf();
         inFile.close();
         return deserializeUtxoSet(buffer.str());
-    } catch (const std::exception& e) {
+    }
+    catch (const std::exception& e) {
         throw StorageError("Error loading UTXO set: " + std::string(e.what()));
     }
 }
@@ -253,7 +299,8 @@ void StorageManager::saveChainTip(const std::string& tipHash, std::int64_t heigh
         outFile << tipHash << "\n" << height; // Hash on first line, height on second
         outFile.close();
         // log("Saved chain tip: " + tipHash.substr(0, 8) + "... at height " + std::to_string(height));
-    } catch (const std::exception& e) {
+    }
+    catch (const std::exception& e) {
         throw StorageError("Error saving chain tip: " + std::string(e.what()));
     }
 }
@@ -280,14 +327,15 @@ bool StorageManager::loadChainTip(std::string& tipHash, std::int64_t& height) {
         }
         inFile.close();
         throw StorageError("Invalid chain tip file format.");
-    } catch (const std::exception& e) {
+    }
+    catch (const std::exception& e) {
         throw StorageError("Error loading chain tip: " + std::string(e.what()));
     }
 }
 
----
+-- -
 
-### Cleanup/Utility
+### Cleanup / Utility
 
 void StorageManager::clearAllData() {
     try {
@@ -295,7 +343,8 @@ void StorageManager::clearAllData() {
             fs::remove_all(dataDirectory); // Recursively remove directory and its contents
             log("Cleared all data from: " + dataDirectory);
         }
-    } catch (const fs::filesystem_error& e) {
+    }
+    catch (const fs::filesystem_error& e) {
         throw StorageError("Failed to clear data directory: " + std::string(e.what()));
     }
 }
