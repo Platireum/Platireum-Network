@@ -21,7 +21,7 @@
  * In production environment, you would need to choose and install
  * a suitable C++ IPFS library. This is a hypothetical include.
  */
-#include "ipfs/client.h"
+// #include "ipfs/client.h" // Temporarily disabled for compilation
 
  // ---------------------------
  // 1. Error Handling
@@ -54,7 +54,7 @@ private:
      * Smart pointer to IPFS client for distributed storage of large data blobs.
      * This allows each StorageManager to maintain its own connection to a local IPFS daemon.
      */
-    std::unique_ptr<ipfs::Client> ipfsClient;
+//    std::unique_ptr<ipfs::Client> ipfsClient; // Temporarily disabled for compilation
 
     // Private helper for logging
     void log(const std::string& message) const;
@@ -62,6 +62,8 @@ private:
     // Private helpers for path management
     std::string getBlockFilePath(const std::string& blockHash) const;
     std::string getTransactionFilePath(const std::string& txId) const;
+    std::string getUtxoSetFilePath() const;
+    std::string getChainTipFilePath() const;
     // ... potentially other file paths for UTXO set, validator state, etc.
 
 public:
@@ -71,13 +73,13 @@ public:
      * @param ipfsApiAddress The IPFS API address (defaults to localhost:5001).
      * @throws StorageError if IPFS client initialization fails.
      */
-    StorageManager(const std::string& dir, const std::string& ipfsApiAddress = "/ip4/127.0.0.1/tcp/5001");
+    StorageManager(const std::string& dir /*, const std::string& ipfsApiAddress = "/ip4/127.0.0.1/tcp/5001"*/);
 
     /**
      * Initializes the storage manager, ensuring the data directory exists
      * and IPFS client is properly configured.
      * @throws StorageError if the directory cannot be created or accessed,
-     *         or if IPFS connection fails.
+     *         or if IPFS connection fails. (IPFS temporarily disabled)
      */
     void initialize();
 
@@ -106,6 +108,13 @@ public:
      */
     bool hasBlock(const std::string& blockHash) const;
 
+    /**
+     * @brief Loads all blocks from persistent storage.
+     * @return A vector of shared_ptr to all loaded Block objects.
+     * @throws StorageError if deserialization or file reading fails for any block.
+     */
+    std::vector<std::shared_ptr<Block>> loadAllBlocks();
+
     // --- Transaction Storage & Retrieval (Small Data - Local Storage) ---
 
     /**
@@ -129,6 +138,13 @@ public:
      * @return True if the transaction exists, false otherwise.
      */
     bool hasTransaction(const std::string& txId) const;
+
+    /**
+     * @brief Loads all transactions from persistent storage.
+     * @return A vector of shared_ptr to all loaded Transaction objects.
+     * @throws StorageError if deserialization or file reading fails for any transaction.
+     */
+    std::vector<std::shared_ptr<Transaction>> loadAllTransactions();
 
     // --- Large Data Blob Storage & Retrieval (IPFS Distributed Storage) ---
 
@@ -204,7 +220,7 @@ public:
      * @brief Gets the IPFS client instance for advanced operations.
      * @return Reference to the IPFS client.
      */
-    ipfs::Client& getIpfsClient() { return *ipfsClient; }
+//    ipfs::Client& getIpfsClient() { return *ipfsClient; } // Temporarily disabled for compilation
 };
 
 #endif // STORAGE_MANAGER_H

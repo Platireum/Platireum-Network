@@ -6,26 +6,22 @@
 #include <stdexcept>    // For std::runtime_error
 #include <string>
 #include <memory>       // For std::make_unique
+#include <nlohmann/json.hpp> // For JSON serialization/deserialization
 
 // Include necessary headers from core for serialization/deserialization
 #include "../../src/core/transaction.h" // For Transaction::serialize/deserialize
-#include "../../src/core/finality_chain.h" // For Block::serialize/deserialize
+#include "../../src/core/block.h"       // For Block::serialize/deserialize
 
 namespace fs = std::filesystem; // Alias for easier use of filesystem library
+using json = nlohmann::json;
 
 // --- Implementation of StorageManager class methods ---
 
 // Constructor with IPFS connection initialization
-StorageManager::StorageManager(const std::string& dir, const std::string& ipfsApiAddress)
+StorageManager::StorageManager(const std::string& dir /*, const std::string& ipfsApiAddress*/)
     : dataDirectory(dir) {
-    try {
-        // Initialize the IPFS client connection
-        ipfsClient = std::make_unique<ipfs::Client>(ipfsApiAddress);
-        log("IPFS client connected to " + ipfsApiAddress);
-    }
-    catch (const std::exception& e) {
-        throw StorageError("Failed to connect to IPFS daemon: " + std::string(e.what()));
-    }
+    // IPFS client initialization temporarily disabled
+    log("StorageManager created for directory: " + dataDirectory);
 }
 
 // Simple logging utility for StorageManager
@@ -75,39 +71,21 @@ void StorageManager::initialize() {
     }
 }
 
-// --- IPFS Data Storage & Retrieval ---
+// --- IPFS Data Storage & Retrieval (Temporarily Disabled) ---
 
 std::string StorageManager::saveDataBlob(const std::vector<char>& dataBlob) {
-    try {
-        // Call the 'Add' function from IPFS library to upload data
-        ipfs::Json result = ipfsClient->Add(dataBlob);
-        std::string cid = result["Hash"]; // Extract CID from response
-        log("Saved data blob to IPFS. CID: " + cid);
-        return cid;
-    }
-    catch (const std::exception& e) {
-        throw StorageError("Failed to save data to IPFS: " + std::string(e.what()));
-    }
+    throw StorageError("IPFS functionality is disabled.");
 }
 
 std::vector<char> StorageManager::loadDataBlob(const std::string& cid) {
-    try {
-        // Call the 'Cat' function (or equivalent) to retrieve data
-        std::stringstream dataStream;
-        ipfsClient->Cat(cid, &dataStream);
-
-        // Convert data from stream to vector<char>
-        std::string dataStr = dataStream.str();
-        return std::vector<char>(dataStr.begin(), dataStr.end());
-    }
-    catch (const std::exception& e) {
-        throw StorageError("Failed to load data from IPFS for CID " + cid + ": " + std::string(e.what()));
-    }
+    throw StorageError("IPFS functionality is disabled.");
 }
 
--- -
+bool StorageManager::hasDataBlob(const std::string& cid) {
+    throw StorageError("IPFS functionality is disabled.");
+}
 
-### Block Storage & Retrieval
+// --- Block Storage & Retrieval ---
 
 void StorageManager::saveBlock(std::shared_ptr<Block> block) {
     if (!block) {
@@ -153,9 +131,30 @@ bool StorageManager::hasBlock(const std::string& blockHash) const {
     return fs::exists(getBlockFilePath(blockHash));
 }
 
--- -
+std::vector<std::shared_ptr<Block>> StorageManager::loadAllBlocks() {
+    std::vector<std::shared_ptr<Block>> blocks;
+    std::string blocksDirPath = dataDirectory + "/blocks";
+    if (!fs::exists(blocksDirPath) || !fs::is_directory(blocksDirPath)) {
+        return blocks; // Return empty vector if directory doesn't exist
+    }
 
-### Transaction Storage & Retrieval
+    for (const auto& entry : fs::directory_iterator(blocksDirPath)) {
+        if (entry.is_regular_file() && entry.path().extension() == ".json") {
+            try {
+                std::string blockHash = entry.path().stem().string();
+                std::shared_ptr<Block> block = loadBlock(blockHash);
+                if (block) {
+                    blocks.push_back(block);
+                }
+            } catch (const std::exception& e) {
+                log("Warning: Failed to load block from file " + entry.path().string() + ": " + e.what());
+            }
+        }
+    }
+    return blocks;
+}
+
+// --- Transaction Storage & Retrieval ---
 
 void StorageManager::saveTransaction(std::shared_ptr<Transaction> tx) {
     if (!tx) {
@@ -201,56 +200,30 @@ bool StorageManager::hasTransaction(const std::string& txId) const {
     return fs::exists(getTransactionFilePath(txId));
 }
 
--- -
-
-### State Storage & Retrieval(UTXO Set, Chain Tip)
-
-// Helper to serialize UTXO set (simple JSON-like string)
-std::string serializeUtxoSet(const std::unordered_map<std::string, TransactionOutput>&utxos) {
-    std::string serializedData = "{";
-    bool first = true;
-    for (const auto& pair : utxos) {
-        if (!first) serializedData += ",";
-        serializedData += "\"" + pair.first + "\":" + pair.second.serialize();
-        first = false;
+std::vector<std::shared_ptr<Transaction>> StorageManager::loadAllTransactions() {
+    std::vector<std::shared_ptr<Transaction>> transactions;
+    std::string txsDirPath = dataDirectory + "/transactions";
+    if (!fs::exists(txsDirPath) || !fs::is_directory(txsDirPath)) {
+        return transactions; // Return empty vector if directory doesn't exist
     }
-    serializedData += "}";
-    return serializedData;
+
+    for (const auto& entry : fs::directory_iterator(txsDirPath)) {
+        if (entry.is_regular_file() && entry.path().extension() == ".json") {
+            try {
+                std::string txId = entry.path().stem().string();
+                std::shared_ptr<Transaction> tx = loadTransaction(txId);
+                if (tx) {
+                    transactions.push_back(tx);
+                }
+            } catch (const std::exception& e) {
+                log("Warning: Failed to load transaction from file " + entry.path().string() + ": " + e.what());
+            }
+        }
+    }
+    return transactions;
 }
 
-// Helper to deserialize UTXO set (simple JSON-like string)
-std::unordered_map<std::string, TransactionOutput> deserializeUtxoSet(const std::string& data) {
-    std::unordered_map<std::string, TransactionOutput> utxos;
-    // This is a very basic parsing. A robust solution would use a JSON parsing library.
-    // This assumes format {"utxo_id1":{tx_output_json1}, "utxo_id2":{tx_output_json2}}
-    if (data.length() < 2 || data.front() != '{' || data.back() != '}') {
-        throw StorageError("Invalid UTXO set data format (not enclosed in {}).");
-    }
-    std::string inner_data = data.substr(1, data.length() - 2); // Remove outer braces
-
-    std::stringstream ss(inner_data);
-    std::string segment;
-    while (std::getline(ss, segment, ',')) {
-        size_t colon_pos = segment.find(':');
-        if (colon_pos == std::string::npos) continue;
-
-        std::string key_str = segment.substr(0, colon_pos);
-        // Remove quotes if present
-        if (key_str.length() >= 2 && key_str.front() == '"' && key_str.back() == '"') {
-            key_str = key_str.substr(1, key_str.length() - 2);
-        }
-
-        std::string value_str = segment.substr(colon_pos + 1);
-        try {
-            TransactionOutput utxo_output = TransactionOutput::deserialize(value_str);
-            utxos[utxo_output.getId()] = utxo_output;
-        }
-        catch (const std::exception& e) {
-            throw StorageError("Error deserializing UTXO entry: " + std::string(e.what()));
-        }
-    }
-    return utxos;
-}
+// --- State Storage & Retrieval (UTXO Set, Chain Tip) ---
 
 void StorageManager::saveUtxoSet(const std::unordered_map<std::string, TransactionOutput>& utxos) {
     std::string filePath = getUtxoSetFilePath();
@@ -259,7 +232,11 @@ void StorageManager::saveUtxoSet(const std::unordered_map<std::string, Transacti
         if (!outFile.is_open()) {
             throw StorageError("Failed to open file for writing UTXO set: " + filePath);
         }
-        outFile << serializeUtxoSet(utxos);
+        json j_utxos;
+        for (const auto& pair : utxos) {
+            j_utxos[pair.first] = pair.second;
+        }
+        outFile << j_utxos.dump(4); // Pretty print JSON
         outFile.close();
         // log("Saved UTXO set with " + std::to_string(utxos.size()) + " entries.");
     }
@@ -270,19 +247,24 @@ void StorageManager::saveUtxoSet(const std::unordered_map<std::string, Transacti
 
 std::unordered_map<std::string, TransactionOutput> StorageManager::loadUtxoSet() {
     std::string filePath = getUtxoSetFilePath();
+    std::unordered_map<std::string, TransactionOutput> utxos;
     if (!fs::exists(filePath)) {
         // log("UTXO set file not found. Returning empty set.");
-        return {}; // Return empty set if file doesn't exist
+        return utxos; // Return empty set if file doesn't exist
     }
     try {
         std::ifstream inFile(filePath);
         if (!inFile.is_open()) {
             throw StorageError("Failed to open file for reading UTXO set: " + filePath);
         }
-        std::stringstream buffer;
-        buffer << inFile.rdbuf();
+        json j_utxos;
+        inFile >> j_utxos;
         inFile.close();
-        return deserializeUtxoSet(buffer.str());
+
+        for (json::iterator it = j_utxos.begin(); it != j_utxos.end(); ++it) {
+            utxos[it.key()] = it.value().get<TransactionOutput>();
+        }
+        return utxos;
     }
     catch (const std::exception& e) {
         throw StorageError("Error loading UTXO set: " + std::string(e.what()));
@@ -333,9 +315,7 @@ bool StorageManager::loadChainTip(std::string& tipHash, std::int64_t& height) {
     }
 }
 
--- -
-
-### Cleanup / Utility
+// --- Cleanup / Utility ---
 
 void StorageManager::clearAllData() {
     try {
@@ -348,3 +328,4 @@ void StorageManager::clearAllData() {
         throw StorageError("Failed to clear data directory: " + std::string(e.what()));
     }
 }
+
