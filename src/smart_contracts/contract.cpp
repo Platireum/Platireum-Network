@@ -1,11 +1,12 @@
 #include "contract.h"
 #include <iostream>
 #include <sstream>
+#include <iomanip> // For std::setw, std::setfill
 #include <stdexcept>
 
 // Constructor
-SmartContract::SmartContract(const std::string& id, const std::string& code, const std::string& owner)
-    : contractId(id), contractCode(code), ownerPublicKey(owner) {
+SmartContract::SmartContract(const std::string& id, const std::vector<uint8_t>& bytecode, const std::string& owner)
+    : contractId(id), contractBytecode(bytecode), ownerPublicKey(owner) {
     // Initial state can be empty or set by deployer
 }
 
@@ -28,15 +29,7 @@ std::string SmartContract::getState(const std::string& key) const {
 }
 
 // Execute the contract's logic
-std::string SmartContract::execute(const std::string& senderId, const std::string& methodName, const std::string& paramsJson) {
-    if (executionLogic) {
-        // Pass a reference to 'this' (the current contract instance) to the execution logic
-        // This allows the logic to modify the contract's state using setState().
-        return executionLogic(senderId, methodName, paramsJson, *this);
-    } else {
-        throw std::runtime_error("Contract execution logic not set for contract: " + contractId);
-    }
-}
+// REMOVED: execute method - execution responsibility moved to VMEngine
 
 // --- Serialization/Deserialization ---
 // A simple JSON-like serialization format for demonstration:
@@ -46,7 +39,13 @@ std::string SmartContract::serialize() const {
     std::stringstream ss;
     ss << "{";
     ss << "\"id\":\"" << contractId << "\",";
-    ss << "\"code\":\"" << contractCode << "\",";
+    // Convert bytecode to base64 for JSON serialization
+    // For simplicity, we'll just represent it as a string of hex for now
+    std::stringstream ss_bytecode;
+    for (uint8_t byte : contractBytecode) {
+        ss_bytecode << std::hex << std::setw(2) << std::setfill('0') << (int)byte;
+    }
+    ss << "\"bytecode\":\"" << ss_bytecode.str() << "\",";
     ss << "\"owner\":\"" << ownerPublicKey << "\",";
     ss << "\"state\":{";
     bool first_state_entry = true;
@@ -71,11 +70,11 @@ std::shared_ptr<SmartContract> SmartContract::deserialize(const std::string& dat
 
     // Basic parsing logic (very fragile, use a JSON library in production)
     size_t id_pos = data.find("\"id\":\"");
-    size_t code_pos = data.find("\"code\":\"");
+    size_t bytecode_pos = data.find("\"bytecode\":\"");
     size_t owner_pos = data.find("\"owner\":\"");
     size_t state_pos = data.find("\"state\":{");
 
-    if (id_pos == std::string::npos || code_pos == std::string::npos ||
+    if (id_pos == std::string::npos || bytecode_pos == std::string::npos ||
         owner_pos == std::string::npos || state_pos == std::string::npos) {
         throw std::runtime_error("Failed to parse SmartContract: Missing essential fields.");
     }
@@ -86,11 +85,16 @@ std::shared_ptr<SmartContract> SmartContract::deserialize(const std::string& dat
     if (id_end == std::string::npos) throw std::runtime_error("Invalid contract ID format.");
     id = data.substr(id_pos, id_end - id_pos);
 
-    // Extracting code
-    code_pos += 8; // Move past "code":"
-    size_t code_end = data.find("\"", code_pos);
-    if (code_end == std::string::npos) throw std::runtime_error("Invalid contract code format.");
-    code = data.substr(code_pos, code_end - code_pos);
+    // Extracting bytecode
+    bytecode_pos += 12; // Move past "bytecode":"
+    size_t bytecode_end = data.find("\"", bytecode_pos);
+    if (bytecode_end == std::string::npos) throw std::runtime_error("Invalid contract bytecode format.");
+    std::string bytecode_hex = data.substr(bytecode_pos, bytecode_end - bytecode_pos);
+    std::vector<uint8_t> bytecode_vec;
+    for (size_t i = 0; i < bytecode_hex.length(); i += 2) {
+        std::string byteString = bytecode_hex.substr(i, 2);
+        bytecode_vec.push_back(static_cast<uint8_t>(std::stoul(byteString, nullptr, 16)));
+    }
 
     // Extracting owner
     owner_pos += 9; // Move past "owner":"
@@ -126,7 +130,7 @@ std::shared_ptr<SmartContract> SmartContract::deserialize(const std::string& dat
         }
     }
 
-    std::shared_ptr<SmartContract> contract = std::make_shared<SmartContract>(id, code, owner);
+    std::shared_ptr<SmartContract> contract = std::make_shared<SmartContract>(id, bytecode_vec, owner);
     contract->contractState = state; // Directly assign the parsed state
     return contract;
 }
