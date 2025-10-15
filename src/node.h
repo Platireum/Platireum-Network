@@ -7,12 +7,18 @@
 #include <unordered_map>
 #include <algorithm> // Required for min/max/clamp if specific reputation logic is implemented
 
+#include "ai_engine/ai_engine.h" // For AIEngine
+
+// Define a constant for the maximum number of transactions per block
+#define MAX_TRANSACTIONS_PER_BLOCK 100 // Example value
+
 // Core components
-#include "core/finality_chain.h" // For Block and FinalityChain
+#include "core/block.h" // For Block
+#include "core/finality_chain.h" // For FinalityChain
 #include "core/transaction_dag.h" // For TransactionDAG
 #include "core/transaction.h"    // For Transaction
 #include "core/key_generator.h"  // For KeyGenerator
-#include "storage/storage_manager.h" // For StorageManager
+#include "storage/storage.h" // For StorageManager
 
 // Smart Contract components
 #include "smart_contracts/vm_engine.h"
@@ -31,9 +37,11 @@ class Node {
 private:
     std::string nodeId;
     std::string nodePublicKey;  // Public key associated with this node's identity
-    std::string nodePrivateKey; // Private key for signing (for this node's operations)
+    CryptoHelper::ECKeyPtr nodePrivateKeyPtr; // Private key for signing (for this node's operations)
 
     // Core Blockchain Components
+
+
     std::shared_ptr<FinalityChain> finalityChain;
     std::shared_ptr<TransactionDAG> transactionDAG;
     std::shared_ptr<KeyGenerator> keyGenerator;
@@ -41,12 +49,14 @@ private:
 
     // Smart Contract Component
     std::shared_ptr<VMEngine> vmEngine;
+    std::shared_ptr<AIEngine> aiEngine; // New: AI Engine for useful computation
+    std::shared_ptr<ValidatorManager> validatorManager; // New: Validator Manager
 
     // Networking Component (conceptual - will be added later)
     // std::shared_ptr<NetworkManager> networkManager;
 
     // A simple UTXO set managed by the Node/FinalityChain (or derived from it)
-    std::unordered_map<std::string, double> utxoSet; // Simplified: PublicKey -> Balance
+    std::unordered_map<std::string, TransactionOutput> utxoSet; // UTXO_ID -> TransactionOutput
 
     // --- Reputation System Integration (NEW) ---
     /**
@@ -73,8 +83,7 @@ private:
      * @brief Validates a transaction against UTXO set (simplified).
      * @param tx The transaction to validate.
      * @return True if valid, false otherwise.
-     */
-    bool validateTransaction(std::shared_ptr<Transaction> tx) const;
+
 
     /**
      * @brief Updates the local UTXO set based on a confirmed transaction/block.
@@ -115,7 +124,7 @@ public:
      * @param pubKey The public key of this node.
      * @param privKey The private key of this node.
      */
-    Node(const std::string& id, const std::string& pubKey, const std::string& privKey);
+    Node(const std::string& id, const std::string& pubKey, CryptoHelper::ECKeyPtr privateKeyPtr, std::shared_ptr<ValidatorManager> vm = nullptr);
 
     /**
      * @brief Initializes the node and its components.
@@ -134,13 +143,7 @@ public:
      * @brief Gets the unique ID of this node.
      * @return The node's ID.
      */
-    const std::string& getNodeId() const { return nodeId; }
 
-    /**
-     * @brief Gets the public key of this node.
-     * @return The node's public key.
-     */
-    const std::string& getNodePublicKey() const { return nodePublicKey; }
 
     /**
      * @brief Gets the hash of the current chain tip (latest block).
@@ -153,6 +156,9 @@ public:
      * @return The height of the tip block.
      */
     int getChainTipHeight() const;
+
+    const std::string& getNodeId() const { return nodeId; }
+    const std::string& getNodePublicKey() const { return nodePublicKey; }
 
     /**
      * @brief Gets the count of pending transactions in the DAG.
@@ -201,7 +207,7 @@ public:
      * This function acts as a wrapper to VMEngine::deployContract.
      * @param contract The shared_ptr to the SmartContract to deploy.
      */
-    void deployContract(std::shared_ptr<SmartContract> contract);
+    void deployContract(std::shared_ptr<SmartContract> contract, const std::vector<uint8_t>& wasmBytecode);
 
     /**
      * @brief Calls a method on a deployed smart contract.
@@ -242,6 +248,22 @@ public:
      * @return The reputation score (double).
      */
     double getNodeReputation(const std::string& nodeId) const;
+
+    /**
+     * @brief Requests the AIEngine to run an inference task and generate a proof.
+     * @param data_input The input data for the AI computation.
+     * @return A pair containing the ProofOfComputation and the computed score.
+     */
+    std::pair<AIEngine::ProofOfComputation, double> requestAiComputation(const std::string& data_input);
+
+    /**
+     * @brief Requests the AIEngine to verify a given proof of computation.
+     * @param data_input The original input data.
+     * @param expected_score The expected score from the computation.
+     * @param proof The ProofOfComputation to verify.
+     * @return True if the proof is valid, false otherwise.
+     */
+    bool verifyAiComputationProof(const std::string& data_input, double expected_score, const AIEngine::ProofOfComputation& proof);
 };
 
 #endif // NODE_H
