@@ -1,7 +1,7 @@
 # Whitepaper: A Hybrid Blockchain-DAG System for Scalable and Secure Transactions
 
 ## Abstract
-This whitepaper introduces a novel hybrid ledger architecture that combines the strengths of traditional blockchains with the high-throughput capabilities of Directed Acyclic Graphs (DAGs). The system leverages a DAG for rapid, parallel transaction processing, achieving high scalability, while periodically consolidating transaction states onto a Proof-of-Stake (PoS) blockchain for robust finality and enhanced security. Utilizing a UTXO (Unspent Transaction Output) model akin to Bitcoin, and incorporating advanced cryptographic primitives, this design aims to overcome the inherent scalability limitations of pure blockchain solutions without compromising security.
+This whitepaper introduces Platireum Network, a novel hybrid ledger architecture that combines the strengths of traditional blockchains with the high-throughput capabilities of Directed Acyclic Graphs (DAGs) through a **Proof of Computing (PoC)** consensus mechanism. PoC integrates **verifiable AI computation** and **value-based validator selection** to achieve unprecedented scalability, security, and efficiency. The system leverages a DAG for rapid, parallel transaction processing, while periodically consolidating transaction states onto a Finality Chain for robust finality and enhanced security. Utilizing a UTXO (Unspent Transaction Output) model and incorporating advanced cryptographic primitives, this design aims to overcome the inherent scalability limitations of pure blockchain solutions without compromising security, while also incentivizing useful AI work.
 
 ## 1. Introduction
 The advent of blockchain technology has revolutionized digital trust and decentralized systems. However, a fundamental challenge, often referred to as the "blockchain trilemma," posits that a decentralized system can only achieve two of three desired properties: decentralization, security, and scalability. Traditional blockchains, prioritizing decentralization and security, often struggle with transaction throughput, leading to bottlenecks and high fees.
@@ -18,15 +18,34 @@ The core of our system's scalability lies in the Directed Acyclic Graph (DAG). U
 ### 2.2. Blockchain for Finality and Security
 While DAGs excel in speed, establishing strong finality can be challenging. To address this, our hybrid system introduces a "Finality Chain," which is a traditional blockchain operating under a Proof-of-Stake (PoS) consensus mechanism. This blockchain periodically aggregates and finalizes the state of the DAG. By checkpointing the DAG's progress into immutable blocks, the Finality Chain provides robust security guarantees and prevents long-range attacks or double-spending issues that might otherwise arise in a pure DAG environment.
 
-### 2.3. Proof of Stake (PoS) Consensus
-The Finality Chain utilizes a Proof of Stake (PoS) consensus mechanism to select validators responsible for creating new blocks. In PoS, participants (validators) are chosen to create new blocks based on the amount of cryptocurrency they "stake" (hold as collateral) in the network. This mechanism is significantly more energy-efficient than Proof of Work (PoW) and encourages network participation through economic incentives. Validators are rewarded for proposing and validating blocks, and they risk losing their stake if they act maliciously.
+### 2.3. Proof of Computing (PoC) Consensus
+Platireum Network introduces a novel **Proof of Computing (PoC)** consensus mechanism, which extends the traditional Proof-of-Stake (PoS) model by incorporating verifiable AI computation. In PoC, validators are selected not only based on their staked capital but also on their **"Proven Useful Work" (PUW)**, which is derived from their contributions to AI computations. This hybrid approach ensures:
+- **Fairer Validator Selection**: Validators with higher stakes and greater contributions to useful AI computations have a proportionally higher chance of being selected to propose and validate blocks.
+- **Incentivized AI Computation**: The network actively rewards validators for performing and proving useful AI tasks, aligning network security with real-world utility.
+- **Enhanced Security and Efficiency**: By combining the economic security of PoS with the verifiable utility of AI computation, PoC creates a more robust, efficient, and attack-resistant consensus mechanism.
 
-### 2.4. Unspent Transaction Output (UTXO) Model
+### 2.4. AI Computation and Proven Useful Work (PUW)
+At the heart of PoC is the concept of Proven Useful Work. This involves validators performing AI computations (e.g., machine learning model training, data analysis, complex simulations) and generating cryptographic proofs of their work. These proofs are then verified by other network participants. The score derived from this proven work contributes directly to a validator's overall power in the network. The AIEngine component facilitates this process by:
+- **Generating Computation IDs**: Assigning unique identifiers to AI tasks.
+- **Running Inference and Proving**: Executing AI models and generating cryptographic proofs of the computation's integrity and correctness.
+- **Verifying Proofs**: Allowing other nodes to independently verify the submitted proofs without re-running the entire computation.
+
+### 2.5. Value-Based Validator Selection
+Building upon the PoC consensus, Platireum Network employs a **Value-Based Validator Selection** mechanism. This mechanism dynamically assesses each validator's overall contribution to the network, which is a composite score derived from:
+- **Staked Capital**: The amount of cryptocurrency a validator has locked as collateral, representing their economic commitment to the network.
+- **Compute Score**: A cumulative score reflecting the quantity and quality of Proven Useful Work (AI computations) successfully performed and verified by the validator.
+
+The `ValidatorManager` component is responsible for:
+- **Registering and Managing Validators**: Handling the registration, removal, and stake updates for network validators.
+- **Calculating Validator Power**: Combining staked capital and compute score using a weighted formula to determine each validator's effective power.
+- **Regenerating Schedule**: Periodically creating a probabilistic schedule for validator selection, ensuring that validators with higher power have a greater chance of being chosen to propose the next block.
+
+### 2.6. Unspent Transaction Output (UTXO) Model
 The transaction model adopted by this system is the Unspent Transaction Output (UTXO) model, similar to Bitcoin. In this model, every transaction consumes existing UTXOs as inputs and generates new UTXOs as outputs. Each UTXO represents a specific amount of cryptocurrency owned by a specific address. This model provides clear ownership, simplifies transaction validation, and enhances privacy by allowing for multiple outputs to different addresses within a single transaction.
 
 ## 3. System Architecture and Implementation Details
 
-The system is implemented in C++ and leverages OpenSSL for cryptographic operations. It comprises several interconnected components:
+The system is implemented in C++ and leverages OpenSSL for cryptographic operations. It comprises several interconnected components, with significant enhancements to support the Proof of Computing mechanism:
 
 ### 3.1. Error Handling
 The system incorporates custom exception classes (CryptoError, TransactionError, LedgerError) for robust error management. These classes provide detailed messages and, in the case of CryptoError, capture additional OpenSSL error information, facilitating debugging and system stability.
@@ -67,28 +86,30 @@ The central unit of value transfer. A transaction consists of:
 
 Transaction validation ensures that inputs refer to existing UTXOs, signatures are valid, the spender's public key matches the UTXO's owner, and the total output amount does not exceed the total input amount.
 
-### 3.4. DAG Structure (TransactionDAG)
-The TransactionDAG class manages the "tangle" of all transactions.
+### 3.4. TransactionDAG (TransactionDAG)
+The TransactionDAG class manages the "tangle" of all transactions, including regular value transfers and AI computation proofs. It is tightly integrated with the FinalityChain to ensure proper transaction confirmation.
 
-- **Transaction Storage**: Stores all confirmed transactions and maintains their parent-child relationships.
+- **Transaction Storage**: Stores all unconfirmed transactions and maintains their parent-child relationships. Once transactions are included in a Finality Chain block, they are considered confirmed.
+- **Parent Validation**: New transactions must reference existing parent transactions, which can reside either in the TransactionDAG or already be confirmed in the FinalityChain.
 - **Tip Selection**: Provides a mechanism to select a set of "tips" (transactions with no unconfirmed children) that new transactions should reference. This selection is weighted towards newer transactions to encourage network growth and confirmation.
-- **UTXO Set Management**: Maintains the global `utxoSet`, an unordered_map of all currently unspent transaction outputs. This set is dynamically updated when new transactions are added: consumed UTXOs are removed, and newly created UTXOs are added.
+- **Merkle Root Calculation**: Computes the Merkle root of a set of transactions, which is then included in Finality Chain blocks to cryptographically link the DAG state.
 - **Concurrency Control**: A `std::mutex` (`txMutex`) is used to ensure thread-safe access to the transaction data structures.
 
-### 3.5. Blockchain Component (FinalityChain)
-The FinalityChain serves as the secure, linear backbone of the system, providing periodic finality to the transactions within the DAG.
+### 3.5. Finality Chain (FinalityChain)
+The FinalityChain serves as the secure, linear backbone of the system, providing periodic finality to the transactions within the DAG. It interacts directly with the `ValidatorManager` to select block proposers and with the `TransactionDAG` to confirm transactions.
 
 #### Block Structure:
 Each block contains:
 - `blockNumber`: Its position in the chain.
 - `blockHash`: Its unique identifier (SHA-256 hash of its contents).
 - `previousHash`: The hash of the preceding block, linking the chain.
+- `dagMerkleRoot`: The Merkle root of the transactions from the DAG included in this block, ensuring cryptographic linkage.
 - `transactions`: A list of transaction IDs (hashes) from the DAG that are being checkpointed.
 - `validator`: The public key of the validator who created the block.
 - `timestamp`: The time of block creation.
 
 #### Block Creation:
-New blocks are created at regular intervals by selected validators, bundling a collection of the latest "tips" from the DAG into a secure, immutable record.
+New blocks are created at regular intervals by validators selected through the PoC mechanism, bundling a collection of the latest "tips" from the DAG into a secure, immutable record. These blocks confirm the transactions and update the global UTXO set.
 
 #### Chain Integrity:
 The `previousHash` field ensures the integrity and immutability of the blockchain.
@@ -96,26 +117,39 @@ The `previousHash` field ensures the integrity and immutability of the blockchai
 #### Concurrency Control:
 A `std::mutex` (`chainMutex`) protects the internal block vector for thread safety.
 
-### 3.6. Validator System (ValidatorManager)
-The ValidatorManager implements the Proof of Stake (PoS) logic.
+#### UTXO Set Management:
+Maintains the global `utxoSet`, an unordered_map of all currently unspent transaction outputs. This set is dynamically updated when new blocks are added: consumed UTXOs are removed, and newly created UTXOs are added.
 
-- **Validator Registration**: Allows nodes to register as validators by providing their public key and staking a certain amount of cryptocurrency (`MIN_STAKE`).
-- **Weighted Validator Selection**: Implements a weighted random selection mechanism for choosing the next block proposer.
+### 3.6. Validator Manager (ValidatorManager)
+The ValidatorManager is central to the Proof of Computing (PoC) consensus, implementing the value-based validator selection logic.
+
+- **Validator Registration**: Allows nodes to register as validators by providing their public key and staking a certain amount of cryptocurrency.
+- **Compute Score Management**: Tracks and updates the "compute score" for each validator based on their successfully proven AI computations.
+- **Validator Power Calculation**: Dynamically calculates each validator's power, a composite metric based on their staked capital and accumulated compute score. This power directly influences their probability of being selected to propose a block.
+- **Value-Based Selection Schedule**: Periodically regenerates a probabilistic schedule for validator selection, ensuring that validators with higher calculated power have a greater chance of being chosen.
 - **Key Management**: Stores the private keys (or references to them) for registered validators.
-- **Block Time Tracking**: Records the `lastBlockTime` for each validator.
 - **Concurrency Control**: A `std::mutex` (`validatorMutex`) ensures thread-safe operations on validator data.
 
-### 3.7. Main System Class (HybridLedger)
-The HybridLedger class integrates all the above components, forming the complete hybrid system.
+### 3.7. AI Engine (AIEngine)
+The AIEngine component is responsible for facilitating and verifying AI computations within the network, forming the "Computing" aspect of Proof of Computing.
 
-- **Component Composition**: Holds instances of `TransactionDAG`, `FinalityChain`, and `ValidatorManager`.
+- **Inference and Proof Generation**: Executes AI models on provided data and generates a `ProofOfComputation` structure, which includes hashes of the input data and output, along with a cryptographic signature from the compute provider.
+- **Proof Verification**: Allows any node to verify a `ProofOfComputation` by re-running a lightweight verification process (e.g., hash checks, signature verification) without needing to execute the full AI model.
+- **Computation ID Generation**: Assigns unique identifiers to each AI computation, ensuring traceability.
+
+### 3.8. Node (Main System Class)
+The `Node` class integrates all the core components, forming the complete Platireum Network system.
+
+- **Component Composition**: Holds instances of `AIEngine`, `TransactionDAG`, `FinalityChain`, and `ValidatorManager`.
+- **Transaction Processing**: Handles incoming transactions, including regular value transfers and `AI_COMPUTATION_PROOF` transactions. It validates these transactions and adds them to the `TransactionDAG`.
+- **AI Proof Validation**: For `AI_COMPUTATION_PROOF` transactions, the `Node` uses the `AIEngine` to verify the proof and then updates the corresponding validator's compute score via the `ValidatorManager`.
 - **Configuration**: Defines system parameters like `MIN_STAKE` and `BLOCK_INTERVAL`.
 - **Automated Block Creation**: A dedicated background thread runs the `blockCreationWorker`, which periodically:
-  - Gathers recent DAG "tips"
-  - Selects a validator using PoS
-  - Creates a new block with embedded transaction IDs
-  - Updates the validator's `lastBlockTime`
-- **System Lifecycle**: Manages the start and stop of the block creation thread.
+  - Gathers recent DAG "tips" from the `TransactionDAG`.
+  - Selects a validator using the `ValidatorManager`'s value-based selection.
+  - Creates a new block with embedded transaction IDs and the DAG Merkle root.
+  - Adds the new block to the `FinalityChain`, which updates the global UTXO set.
+- **System Lifecycle**: Manages the start and stop of the block creation thread and other network services.
 
 ## 4. Advantages of the Hybrid Approach
 This hybrid architecture offers several significant advantages:
