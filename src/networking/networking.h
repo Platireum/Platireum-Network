@@ -16,6 +16,9 @@
 // Alternatively, Networking can be a separate layer that communicates via callbacks.
 class Node; // Forward declaration of the Node class
 
+#include "core/transaction.h" // Required for std::function<void(std::shared_ptr<Transaction>)> 
+#include "core/block.h"       // Required for std::function<void(std::shared_ptr<Block>)> 
+
 // ---------------------------
 // 0. Error Handling
 // ---------------------------
@@ -148,7 +151,7 @@ public:
      * This allows the Networking layer to inform the Node layer about incoming blocks.
      * @param callback The function to call, typically Node::receiveBlock.
      */
-    void setOnReceiveBlockCallback(std::function<void<std::shared_ptr<Block>>> callback) {
+    void setOnReceiveBlockCallback(std::function<void(std::shared_ptr<Block>)> callback) {
         onReceiveBlockCallback = std::move(callback);
     }
 

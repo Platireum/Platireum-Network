@@ -1,6 +1,6 @@
 #include "networking.h"
-#include "transaction.h" // We need the Transaction definition to deserialize it
-#include "finality_chain.h" // We need the Block definition to deserialize it
+#include "core/transaction.h" // We need the Transaction definition to deserialize it
+#include "core/finality_chain.h" // We need the Block definition to deserialize it
 #include <iostream>      // For logging
 #include <algorithm>     // For std::find_if (if we need to search the peer list)
 
