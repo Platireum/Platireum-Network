@@ -1,4 +1,5 @@
 #include "crypto_helper.h" // We must include our own header file first
+#include <openssl/crypto.h> // For OPENSSL_free
 
 // Initialize the static flag to ensure OpenSSL is initialized only once
 std::once_flag CryptoHelper::cryptoInitFlag;
@@ -53,16 +54,16 @@ std::string CryptoHelper::getPublicKeyHex(const ECKeyPtr& key) {
     
     // Convert the public key from EC_POINT format to a compressed hexadecimal string
     // OPENSSL_free is the memory release function that std::unique_ptr uses for the hex string
-    std::unique_ptr<char, decltype(&OPENSSL_free)> hexStr(
-        EC_POINT_point2hex(group, pubKey, POINT_CONVERSION_COMPRESSED, ctx.get()),
-        OPENSSL_free
-    );
-    
-    if (!hexStr) {
+    char* hex_char_ptr = EC_POINT_point2hex(group, pubKey, POINT_CONVERSION_COMPRESSED, ctx.get());
+    if (!hex_char_ptr) {
         throw CryptoError("Failed to convert public key to hex string");
     }
+    std::string hexStr(hex_char_ptr);
+    OPENSSL_free(hex_char_ptr);
     
-    return std::string(hexStr.get()); // We return the string
+
+    
+    return hexStr; // We return the string
 }
 
 std::vector<unsigned char> CryptoHelper::signData(const ECKeyPtr& privateKey, const std::string& message) {
@@ -206,3 +207,41 @@ std::vector<unsigned char> CryptoHelper::sha256Bytes(const std::string& data) {
     hash.resize(digestLen); // Adjust the vector size to match the actual hash length
     return hash;
 }
+
+
+// Helper for signing a message with a private key string
+std::string CryptoHelper::signMessage(const ECKeyPtr& privateKey, const std::string& message) {
+
+    std::vector<unsigned char> signatureBytes = signData(privateKey, message);
+    return bytesToHex(signatureBytes);
+}
+
+// Helper for verifying a message with a public key string and signature string
+bool CryptoHelper::verifySignature(const std::string& publicKeyHex, const std::string& signatureHex, const std::string& message) {
+    std::vector<unsigned char> signatureBytes = hexToBytes(signatureHex);
+    return verifySignature(publicKeyHex, signatureBytes, message);
+}
+
+
+
+std::string CryptoHelper::bytesToHex(const std::vector<unsigned char>& bytes) {
+    std::stringstream ss;
+    ss << std::hex << std::setfill('0');
+    for (unsigned char b : bytes) {
+        ss << std::setw(2) << static_cast<int>(b);
+    }
+    return ss.str();
+}
+
+std::vector<unsigned char> CryptoHelper::hexToBytes(const std::string& hexString) {
+    if (hexString.length() % 2 != 0) {
+        throw CryptoError("Hex string must have an even length");
+    }
+    std::vector<unsigned char> bytes;
+    for (size_t i = 0; i < hexString.length(); i += 2) {
+        std::string byteString = hexString.substr(i, 2);
+        bytes.push_back(static_cast<unsigned char>(std::stoul(byteString, nullptr, 16)));
+    }
+    return bytes;
+}
+

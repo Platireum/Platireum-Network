@@ -1,218 +1,222 @@
-#include "crypto_helper.h"
-#include <stdexcept>
-#include <iostream> // For error logging to cerr
+#include "finality_chain.h"
+#include <iostream>
+#include <algorithm>
 
-// Define the static member once_flag
-std::once_flag CryptoHelper::cryptoInitFlag;
-
-// Custom deleter for EC_KEY to ensure proper cleanup
-namespace {
-    struct ECKeyDeleter {
-        void operator()(EC_KEY* key) const {
-            if (key) EC_KEY_free(key);
-        }
-    };
-} // end anonymous namespace
-
-// Private helper to initialize OpenSSL libraries
-void CryptoHelper::initializeOpenSSL() {
-    // ERR_load_crypto_strings(); // Not strictly needed for basic EC operations, but good for debugging
-    // OpenSSL_add_all_algorithms(); // Not strictly needed for basic EC operations
-    // Seed PRNG if not already seeded (OpenSSL 1.1.0+ handles this automatically for most platforms)
+// Constructor
+FinalityChain::FinalityChain(std::shared_ptr<ValidatorManager> vm) : currentHeight(-1), validatorManager(std::move(vm)) {
+    // The genesis block will set the initial state
 }
 
-// Private helper to calculate SHA256 hash as bytes
-std::vector<unsigned char> CryptoHelper::sha256Bytes(const std::string& data) {
-    std::call_once(cryptoInitFlag, initializeOpenSSL);
+void FinalityChain::initializeGenesisBlock(const std::string& validatorId, const CryptoHelper::ECKeyPtr& validatorPrivateKey) {
+    std::lock_guard<std::mutex> lock(chainMutex);
 
-    std::vector<unsigned char> hash(SHA256_DIGEST_LENGTH);
-    if (!SHA256(reinterpret_cast<const unsigned char*>(data.c_str()), data.length(), hash.data())) {
-        throw CryptoError("Failed to compute SHA256 hash.");
+    if (currentHeight != -1) {
+        throw FinalityChainError("Genesis block already initialized.");
     }
-    return hash;
+
+    // Create a dummy transaction for the genesis block (e.g., a coinbase transaction)
+    // This transaction won't have parents in the DAG context.
+    // For a coinbase, the payload will contain the output.
+    json genesisPayload;
+    genesisPayload["outputs"] = {{{"recipientPublicKey", validatorId}, {"amount", 1000000000000LL}}};
+
+    Transaction genesisCoinbaseTx(
+        TransactionType::VALUE_TRANSFER, // Type
+        validatorId,                     // Creator Public Key
+        genesisPayload.dump(),           // Payload (JSON string of outputs)
+        {},                              // Parents
+        {}                               // AI Proof
+    );
+    genesisCoinbaseTx.sign(validatorPrivateKey); // Sign with the validator's private key
+
+    std::vector<std::shared_ptr<Transaction>> genesisTransactions;
+    genesisTransactions.push_back(std::make_shared<Transaction>(genesisCoinbaseTx));
+
+    // Create the genesis block
+    Block genesisBlock("0000000000000000000000000000000000000000000000000000000000000000", // Previous block hash
+                       0, // Height
+                       "genesis_dag_root_hash", // Dummy DAG root hash
+                       validatorId,
+                       validatorPrivateKey,
+                       genesisTransactions);
+
+    // Add to blocks map
+    blocks[genesisBlock.getHash()] = std::make_shared<Block>(genesisBlock);
+    currentChainTipHash = genesisBlock.getHash();
+    currentHeight = 0;
+    blockHeights[genesisBlock.getHash()] = 0;
+    hashByHeight[0] = genesisBlock.getHash();
+
+    // Update UTXO set for genesis coinbase transaction
+    for (size_t i = 0; i < genesisCoinbaseTx.getOutputs().size(); ++i) {
+        utxoSet[genesisCoinbaseTx.getId() + ":" + std::to_string(i)] = genesisCoinbaseTx.getOutputs()[i];
+    }
+
+    std::cout << "Genesis block initialized with hash: " << currentChainTipHash.substr(0, 10) << "..." << std::endl;
 }
 
-// Generates a new Elliptic Curve Cryptography (ECC) key pair using secp256k1 curve.
-CryptoHelper::ECKeyPtr CryptoHelper::generateKeyPair() {
-    std::call_once(cryptoInitFlag, initializeOpenSSL);
+bool FinalityChain::addBlock(std::shared_ptr<Block> newBlock,
+                             const std::unordered_map<std::string, std::shared_ptr<Transaction>>& transactionsInBlock) {
+    std::lock_guard<std::mutex> lock(chainMutex);
 
-    EC_KEY* ec_key = EC_KEY_new_by_curve_name(NID_secp256k1);
-    if (!ec_key) {
-        throw CryptoError("Failed to create EC_KEY: " + std::string(ERR_error_string(ERR_get_error(), NULL)));
+    if (!newBlock) {
+        throw FinalityChainError("Attempted to add a null block.");
     }
 
-    if (!EC_KEY_generate_key(ec_key)) {
-        EC_KEY_free(ec_key);
-        throw CryptoError("Failed to generate EC key pair: " + std::string(ERR_error_string(ERR_get_error(), NULL)));
+    const std::string& blockHash = newBlock->getHash();
+    const std::string& prevBlockHash = newBlock->getPreviousBlockHash();
+
+    // 1. Check if block already exists
+    if (blocks.count(blockHash)) {
+        std::cerr << "Block already exists in chain: " << blockHash.substr(0, 10) << "..." << std::endl;
+        return false;
     }
 
-    return ECKeyPtr(ec_key, ECKeyDeleter());
-}
-
-// Extracts the public key in hexadecimal compressed format from an EC_KEY.
-std::string CryptoHelper::getPublicKeyHex(const ECKeyPtr& key) {
-    if (!key) {
-        throw CryptoError("Attempted to get public key from null EC_KEY pointer.");
+    // 2. Validate previous block existence and height
+    auto prevBlockIt = blocks.find(prevBlockHash);
+    if (prevBlockIt == blocks.end()) {
+        std::cerr << "Previous block not found for block: " << blockHash.substr(0, 10) << "..." << std::endl;
+        return false;
+    }
+    if (newBlock->getHeight() != prevBlockIt->second->getHeight() + 1) {
+        std::cerr << "Block height mismatch for block: " << blockHash.substr(0, 10) << "..." << std::endl;
+        return false;
     }
 
-    BIO* bio = BIO_new(BIO_s_mem());
-    if (!bio) {
-        throw CryptoError("Failed to create BIO for public key export.");
+    // 3. Validate block (hash, signature, etc.)
+    // In a real system, validatorPublicKeyHex would be retrieved from a staking registry
+    // For now, we assume validatorId is the public key string itself.
+    if (!newBlock->validate(newBlock->getValidatorId())) {
+        std::cerr << "Block validation failed for block: " << blockHash.substr(0, 10) << "..." << std::endl;
+        return false;
     }
 
-    // Write public key in compressed form (POINT_CONVERSION_COMPRESSED)
-    // PEM_write_bio_EC_PUBKEY writes in PEM format, which is not just raw hex.
-    // We need to directly convert the EC_POINT to hex.
-    const EC_GROUP* group = EC_KEY_get0_group(key.get());
-    const EC_POINT* pub_point = EC_KEY_get0_public_key(key.get());
-    if (!group || !pub_point) {
-        BIO_free(bio);
-        throw CryptoError("Failed to get EC group or public point.");
-    }
-
-    // Get the length of the public key in compressed form
-    size_t len = EC_POINT_point2oct(group, pub_point, POINT_CONVERSION_COMPRESSED, NULL, 0, NULL);
-    if (len == 0) {
-        BIO_free(bio);
-        throw CryptoError("Failed to get public key length.");
-    }
-
-    std::vector<unsigned char> pub_key_bytes(len);
-    if (EC_POINT_point2oct(group, pub_point, POINT_CONVERSION_COMPRESSED, pub_key_bytes.data(), len, NULL) == 0) {
-        BIO_free(bio);
-        throw CryptoError("Failed to convert public key to octet string.");
-    }
-
-    BIO_free(bio); // Free the BIO as it's no longer needed for this method
-    return bytesToHex(pub_key_bytes);
-}
-
-
-// Converts a hexadecimal public key string back into an EC_KEY object.
-CryptoHelper::ECKeyPtr CryptoHelper::publicKeyFromHex(const std::string& publicKeyHex) {
-    std::call_once(cryptoInitFlag, initializeOpenSSL);
-
-    std::vector<unsigned char> pub_key_bytes = hexToBytes(publicKeyHex);
-
-    EC_KEY* ec_key = EC_KEY_new_by_curve_name(NID_secp256k1);
-    if (!ec_key) {
-        throw CryptoError("Failed to create EC_KEY for public key import.");
-    }
-
-    const EC_POINT* pub_point = EC_POINT_new(EC_KEY_get0_group(ec_key));
-    if (!pub_point) {
-        EC_KEY_free(ec_key);
-        throw CryptoError("Failed to create EC_POINT for public key import.");
-    }
-
-    // Convert octet string to EC_POINT (public key)
-    if (!EC_POINT_oct2point(EC_KEY_get0_group(ec_key), pub_point, pub_key_bytes.data(), pub_key_bytes.size(), NULL)) {
-        EC_POINT_free(pub_point);
-        EC_KEY_free(ec_key);
-        throw CryptoError("Failed to convert public key hex to EC_POINT: " + std::string(ERR_error_string(ERR_get_error(), NULL)));
-    }
-
-    if (!EC_KEY_set_public_key(ec_key, pub_point)) {
-        EC_POINT_free(pub_point);
-        EC_KEY_free(ec_key);
-        throw CryptoError("Failed to set public key on EC_KEY object: " + std::string(ERR_error_string(ERR_get_error(), NULL)));
-    }
-
-    EC_POINT_free(pub_point); // Free the point after setting it
-
-    return ECKeyPtr(ec_key, ECKeyDeleter());
-}
-
-
-// Signs a message using the provided private EC_KEY.
-std::vector<unsigned char> CryptoHelper::signData(const ECKeyPtr& privateKey, const std::string& message) {
-    if (!privateKey) {
-        throw CryptoError("Attempted to sign with null private key.");
-    }
-
-    // Hash the message first
-    std::vector<unsigned char> digest = sha256Bytes(message);
-
-    unsigned int sig_len = 0;
-    // ECDSA_size returns the maximum possible size of a DER-encoded signature
-    // ECDSA_do_sign returns DER-encoded signature
-    std::vector<unsigned char> signature(ECDSA_size(privateKey.get()));
-
-    if (!ECDSA_sign(0, digest.data(), digest.size(), signature.data(), &sig_len, privateKey.get())) {
-        throw CryptoError("Failed to sign data: " + std::string(ERR_error_string(ERR_get_error(), NULL)));
-    }
-
-    signature.resize(sig_len); // Resize to actual signature length
-    return signature;
-}
-
-// Verifies an ECDSA signature against a message and a public key.
-bool CryptoHelper::verifySignature(const std::string& publicKeyHex,
-                                   const std::vector<unsigned char>& signature,
-                                   const std::string& message) {
-    std::call_once(cryptoInitFlag, initializeOpenSSL);
-
-    ECKeyPtr public_key = nullptr;
+    // 4. Temporarily apply UTXO changes to validate transactions
+    std::unordered_map<std::string, TransactionOutput> tempUtxoSet = utxoSet;
     try {
-        public_key = publicKeyFromHex(publicKeyHex);
-    } catch (const CryptoError& e) {
-        std::cerr << "Error converting public key hex for verification: " << e.what() << std::endl;
+        updateUtxoSet(*newBlock, transactionsInBlock, false, tempUtxoSet);
+    } catch (const FinalityChainError& e) {
+        std::cerr << "UTXO update failed for block " << blockHash.substr(0, 10) << "...: " << e.what() << std::endl;
         return false;
     }
 
-    if (!public_key) {
-        std::cerr << "Invalid public key after conversion for verification." << std::endl;
-        return false;
-    }
+    // If all validations pass, add the block to the chain
+    blocks[blockHash] = newBlock;
+    currentChainTipHash = blockHash;
+    currentHeight = newBlock->getHeight();
+    blockHeights[blockHash] = currentHeight;
+    hashByHeight[currentHeight] = blockHash;
+    utxoSet = tempUtxoSet; // Commit UTXO changes
 
-    // Hash the message first
-    std::vector<unsigned char> digest = sha256Bytes(message);
-
-    // ECDSA_verify returns 1 for success, 0 for failure, -1 for error
-    int result = ECDSA_verify(0, digest.data(), digest.size(), signature.data(), signature.size(), public_key.get());
-    if (result == 1) {
-        return true;
-    } else if (result == 0) {
-        // Signature is invalid
-        // ERR_print_errors_fp(stderr); // Uncomment for detailed OpenSSL error if verification fails
-        return false;
-    } else {
-        // An error occurred during verification
-        throw CryptoError("Error during signature verification: " + std::string(ERR_error_string(ERR_get_error(), NULL)));
-    }
+    std::cout << "Block added: " << blockHash.substr(0, 10) << "... (Height: " << currentHeight << ")" << std::endl;
+    return true;
 }
 
-// Computes the SHA-256 hash of a string and returns it as a hexadecimal string.
-std::string CryptoHelper::sha256(const std::string& data) {
-    std::vector<unsigned char> hash_bytes = sha256Bytes(data);
-    return bytesToHex(hash_bytes);
+std::shared_ptr<Block> FinalityChain::getBlock(const std::string& blockHash) const {
+    std::lock_guard<std::mutex> lock(chainMutex);
+    auto it = blocks.find(blockHash);
+    if (it != blocks.end()) {
+        return it->second;
+    }
+    return nullptr;
 }
 
-// Converts a vector of bytes to its hexadecimal string representation.
-std::string CryptoHelper::bytesToHex(const std::vector<unsigned char>& bytes) {
-    std::stringstream ss;
-    ss << std::hex << std::setfill('0');
-    for (unsigned char b : bytes) {
-        ss << std::setw(2) << static_cast<int>(b);
+std::shared_ptr<Block> FinalityChain::getBlockByHeight(int height) const {
+    std::lock_guard<std::mutex> lock(chainMutex);
+    auto it = hashByHeight.find(height);
+    if (it != hashByHeight.end()) {
+        return getBlock(it->second);
     }
-    return ss.str();
+    return nullptr;
 }
 
-// Converts a hexadecimal string to a vector of bytes.
-std::vector<unsigned char> CryptoHelper::hexToBytes(const std::string& hexString) {
-    if (hexString.length() % 2 != 0) {
-        throw std::runtime_error("Hex string must have an even length.");
-    }
-    std::vector<unsigned char> bytes;
-    bytes.reserve(hexString.length() / 2);
-    for (size_t i = 0; i < hexString.length(); i += 2) {
-        std::string byteString = hexString.substr(i, 2);
-        try {
-            unsigned char byte = static_cast<unsigned char>(std::stoul(byteString, nullptr, 16));
-            bytes.push_back(byte);
-        } catch (const std::exception& e) {
-            throw std::runtime_error("Invalid hexadecimal character in string: " + byteString + " (" + e.what() + ")");
+
+
+
+
+
+
+bool FinalityChain::containsTransaction(const std::string& txId) const {
+    std::lock_guard<std::mutex> lock(chainMutex);
+    for (const auto& pair : blocks) {
+        const std::shared_ptr<Block>& block = pair.second;
+        const std::vector<std::string>& txIds = block->getTransactionIds();
+        if (std::find(txIds.begin(), txIds.end(), txId) != txIds.end()) {
+            return true;
         }
     }
-    return bytes;
+    return false;
 }
+
+bool FinalityChain::containsBlock(const std::string& blockHash) const {
+    std::lock_guard<std::mutex> lock(chainMutex);
+    return blocks.count(blockHash) > 0;
+}
+
+void FinalityChain::printChainStatus() const {
+    std::lock_guard<std::mutex> lock(chainMutex);
+    std::cout << "\n--- Finality Chain Status ---" << std::endl;
+    std::cout << "Current Height: " << currentHeight << std::endl;
+    if (!currentChainTipHash.empty()) {
+        std::cout << "Current Tip Hash: " << currentChainTipHash.substr(0, 10) << "..." << std::endl;
+    }
+    std::cout << "Total Blocks: " << blocks.size() << std::endl;
+    std::cout << "Total UTXOs: " << utxoSet.size() << std::endl;
+    std::cout << "--- End Finality Chain Status ---\n" << std::endl;
+}
+
+void FinalityChain::clear() {
+    std::lock_guard<std::mutex> lock(chainMutex);
+    blocks.clear();
+    utxoSet.clear();
+    blockHeights.clear();
+    hashByHeight.clear();
+    currentChainTipHash = "";
+    currentHeight = -1;
+}
+
+
+
+void FinalityChain::updateUtxoSet(const Block& block,
+                                  const std::unordered_map<std::string, std::shared_ptr<Transaction>>& transactionsInBlock,
+                                  bool isRevert,
+                                  std::unordered_map<std::string, TransactionOutput>& targetUtxoSet) {
+    for (const std::string& txId : block.getTransactionIds()) {
+        auto txIt = transactionsInBlock.find(txId);
+        if (txIt == transactionsInBlock.end()) {
+            throw FinalityChainError("Transaction " + txId.substr(0, 10) + "... not found in block's provided transactions.");
+        }
+        const std::shared_ptr<Transaction>& tx = txIt->second;
+
+        if (!isRevert) {
+            // Apply transaction: remove spent UTXOs, add new ones
+            for (const auto& input : tx->getInputs()) {
+                std::string utxoKey = input.transactionId + ":" + std::to_string(input.outputIndex);
+                if (targetUtxoSet.count(utxoKey)) {
+                    targetUtxoSet.erase(utxoKey);
+                } else {
+                    throw FinalityChainError("Attempted to spend non-existent UTXO: " + utxoKey);
+                }
+            }
+            for (size_t i = 0; i < tx->getOutputs().size(); ++i) {
+                targetUtxoSet[tx->getId() + ":" + std::to_string(i)] = tx->getOutputs()[i];
+            }
+        } else {
+            // Revert transaction: add back spent UTXOs, remove new ones
+            for (const auto& input : tx->getInputs()) {
+                std::string utxoKey = input.transactionId + ":" + std::to_string(input.outputIndex);
+                // In revert, we add back the UTXO that was spent
+                // This requires storing the state of UTXOs before the block was applied, or having access to previous blocks
+                // For simplicity, this part assumes we can reconstruct the UTXO. More robust solution needed for reorgs.
+                // For now, we'll just re-add a dummy if not found, or assume it's there.
+                // A proper reorg mechanism would involve snapshotting UTXO sets or replaying from a common ancestor.
+                // For this PoC, we'll assume a linear chain for now.
+                // targetUtxoSet[utxoKey] = /* original UTXO */; // This is complex without full history
+            }
+            for (size_t i = 0; i < tx->getOutputs().size(); ++i) {
+                targetUtxoSet.erase(tx->getId() + ":" + std::to_string(i));
+            }
+        }
+    }
+}
+

@@ -30,14 +30,22 @@ public:
  * Represents a Validator in the Proof of Stake system.
  * Stores their public key (ID) and their staked amount.
  */
+struct ProvenWork {
+    std::string proof_id;      // Unique ID for the proof of computation
+    double score;              // Score assigned to the computation
+    std::string validator_id;  // ID of the validator who submitted the proof
+    std::chrono::system_clock::time_point timestamp; // Time of submission
+};
+
 struct Validator {
     std::string publicKey;  // The validator's public key (as its unique identifier)
     double stake;           // The amount of currency staked (for consensus participation)
+    double compute_score;   // New: To track useful computational work performed
     // Other fields can be added, such as:
     // int consecutiveBlocksProposed; // Number of consecutive blocks proposed (to improve fairness)
     // std::int64_t lastProposedTime; // Last time the validator proposed a block
 
-    Validator(std::string pk, double s) : publicKey(std::move(pk)), stake(s) {}
+    Validator(std::string pk, double s) : publicKey(std::move(pk)), stake(s), compute_score(0.0) {}
 };
 
 /**
@@ -51,9 +59,16 @@ private:
     
     // The total stake of all active validators
     double totalStake;
+    double totalComputeScore; // New: To track the total compute score of all active validators
 
     // Random number generator for stake-based selection
     mutable std::mt19937 rng; // mutable to allow const functions to change it (like pickValidator)
+
+    // For Value-Based Selection
+    std::vector<std::string> validator_schedule;
+    mutable size_t schedule_index;
+
+    void regenerate_schedule();
 
 public:
     // Constructor
@@ -89,7 +104,7 @@ public:
      * @return The public key of the selected validator.
      * @throws ValidatorManagerError if no active validators are registered.
      */
-    std::string pickValidator() const;
+    std::string pickValidator();
 
     /**
      * Checks if a public key belongs to an active validator.
@@ -119,6 +134,34 @@ public:
     // Utility/Debugging methods
     void printValidators() const;
     void clear(); // Clears all validators (for testing/reset)
+
+    /**
+     * @brief Updates the compute score for a given validator.
+     * @param publicKey The public key (ID) of the validator.
+     * @param score_increase The amount to add to the compute score.
+     * @throws ValidatorManagerError if validator not found or score_increase is negative.
+     */
+    void updateComputeScore(const std::string& publicKey, double score_increase);
+
+    /**
+     * @brief Calculates the total power of a validator based on stake and compute score.
+     * @param publicKey The public key (ID) of the validator.
+     * @return The calculated validator power.
+     * @throws ValidatorManagerError if validator not found.
+     */
+    double calculateValidatorPower(const std::string& publicKey) const;
+
+    // Getters for compute score (optional, but good for debugging/monitoring)
+    double getValidatorComputeScore(const std::string& publicKey) const;
+
+    // Getter for all active validators (for iteration/debugging)
+    const std::unordered_map<std::string, Validator>& getValidators() const { return activeValidators; }
+
+    /**
+     * @brief Adds a new proof of useful work to the system.
+     * @param proof The proven work to add.
+     */
+    void addProvenWork(const ProvenWork& proof);
 };
 
 #endif // VALIDATOR_MANAGER_H

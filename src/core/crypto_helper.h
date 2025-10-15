@@ -2,6 +2,7 @@
 #define CRYPTO_HELPER_H
 
 #include <string>
+#include <cstddef> // For std::size_t
 #include <vector>
 #include <memory>    // For std::shared_ptr, std::unique_ptr
 #include <stdexcept> // For std::runtime_error
@@ -111,6 +112,10 @@ public:
      * @throws CryptoError if hashing fails.
      */
     static std::string sha256(const std::string& data);
+
+    static std::string signMessage(const ECKeyPtr& privateKey, const std::string& message);
+
+    static bool verifySignature(const std::string& publicKeyHex, const std::string& signatureHex, const std::string& message);
 
     /**
      * @brief Converts a vector of bytes to its hexadecimal string representation.

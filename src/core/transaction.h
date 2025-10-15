@@ -3,14 +3,25 @@
 
 #include <string>
 #include <vector>
-#include <unordered_map> // For UTXO Set usage later
-#include <unordered_set> // For preventing UTXO double spending within transaction
-#include <chrono>        // For timestamp
-#include <sstream>       // For string building
-#include <iomanip>       // For formatting
-#include <memory>        // For std::shared_ptr
+#include <memory>
+#include <chrono>
+#include <numeric>
+#include <algorithm>
+#include <stdexcept>
+#include <sstream>
+#include <iomanip>
+#include <unordered_map>
+#include <unordered_set> // For std::unordered_set
 
-#include "crypto_helper.h" // We need crypto functions for hash and signature
+#include "crypto_helper.h"
+#include "../ai_engine/ai_engine.h" // For AIEngine::ProofOfComputation
+#include <nlohmann/json.hpp> // For JSON serialization/deserialization
+
+// Use nlohmann::json for JSON operations
+using json = nlohmann::json;
+
+// Forward declarations
+class Transaction;
 
 // ---------------------------
 // 0. Error Handling
@@ -24,209 +35,169 @@ public:
 };
 
 /**
- * Custom exception class for ledger errors (or general ledger errors)
- */
-class LedgerError : public std::runtime_error {
-public:
-    explicit LedgerError(const std::string& msg) : std::runtime_error(msg) {}
-};
-
-// ---------------------------
-// 1. Transaction Type Enum
-// ---------------------------
-/**
- * Enumeration for different transaction types to make the network "smart"
- * and capable of understanding the context of each operation.
- */
-enum class TransactionType {
-    VALUE_TRANSFER,     // For value transfer (current use case)
-    INFERENCE_REQUEST,  // For model inference requests
-    INFERENCE_RESULT,   // For inference results
-    MODEL_UPDATE,       // For model weights updates
-    CONTRACT_CALL,      // For smart contract calls
-    UNDEFINED          // Undefined type
-};
-
-// ---------------------------
-// 2. Transaction System
-// ---------------------------
-
-/**
- * Unspent Transaction Output (UTXO)
- * Similar to Bitcoin's model where each output can only be spent once.
- * Represents a specific balance owned by a specific address (public key).
- */
-struct TransactionOutput {
-    std::string txId;          // Parent transaction ID (hash of the parent transaction)
-    int outputIndex;           // Output index within the parent transaction
-    std::string owner;         // Owner address (public key in hex format)
-    long long amount;          // Currency amount (changed from double to long long)
-
-    // Default constructor for map usage (required for some map operations)
-    TransactionOutput() : txId(""), outputIndex(-1), owner(""), amount(0) {}
-
-    // Constructor to create a new UTXO
-    TransactionOutput(std::string txId, int outputIndex, std::string owner, long long amount);
-
-    // Creates a unique identifier for this UTXO
-    std::string getId() const;
-
-    // Serialization for hashing/signing
-    std::string serializeForTransactionHash() const;
-};
-
-/**
- * Transaction Input - references a UTXO and provides a signature
- * proving ownership.
- * Represents a UTXO being spent in a new transaction.
+ * @brief Represents an input to a transaction.
+ * An input references an output from a previous transaction (UTXO).
  */
 struct TransactionInput {
-    std::string utxoId;       // ID of the UTXO being spent (TxId:OutputIndex)
-    std::string signature;    // Digital signature of the sender (hex encoded)
-    std::string publicKey;    // Public key of the sender (hex encoded)
+    std::string transactionId; // ID of the transaction containing the UTXO being spent
+    int outputIndex;           // Index of the UTXO in the referenced transaction's outputs
+    std::string signature;     // Signature by the owner of the UTXO
+    std::string publicKey;     // Public key of the owner of the UTXO
 
-    // Default constructor for map usage
-    TransactionInput() : utxoId(""), signature(""), publicKey("") {}
+    // For hashing and comparison
+    std::string toString() const {
+        return transactionId + std::to_string(outputIndex) + publicKey;
+    }
 
-    // Constructor to create a new TransactionInput
-    TransactionInput(std::string utxoId, std::string signature, std::string publicKey);
+    bool operator==(const TransactionInput& other) const {
+        return transactionId == other.transactionId &&
+               outputIndex == other.outputIndex &&
+               signature == other.signature &&
+               publicKey == other.publicKey;
+    }
 
-    // Serialization for signing: what the sender signs to prove ownership of the UTXO.
-    std::string serializeForSigning(const std::string& newTxId) const;
+    // nlohmann/json serialization
+    friend void to_json(json& j, const TransactionInput& p) {
+        j = json{{"transactionId", p.transactionId}, {"outputIndex", p.outputIndex}, {"signature", p.signature}, {"publicKey", p.publicKey}};
+    }
 
-    // Serialization for transaction hash: unique properties of the input.
-    std::string serializeForTransactionHash() const;
+    // nlohmann/json deserialization
+    friend void from_json(const json& j, TransactionInput& p) {
+        j.at("transactionId").get_to(p.transactionId);
+        j.at("outputIndex").get_to(p.outputIndex);
+        j.at("signature").get_to(p.signature);
+        j.at("publicKey").get_to(p.publicKey);
+    }
 };
 
 /**
- * A generic transaction that can handle various types of operations.
- * Modified to support different data types like inference requests and model updates,
- * not just financial transfers.
+ * @brief Represents an output of a transaction.
+ * An output specifies an amount and the recipient's public key.
+ */
+struct TransactionOutput {
+    std::string recipientPublicKey; // Public key of the recipient
+    double amount;                  // Amount of currency
+
+    TransactionOutput() : recipientPublicKey(""), amount(0.0) {}
+    TransactionOutput(const std::string& pubKey, double val) : recipientPublicKey(pubKey), amount(val) {}
+
+    // For hashing and comparison
+    std::string toString() const {
+        return recipientPublicKey + std::to_string(amount);
+    }
+
+    bool operator==(const TransactionOutput& other) const {
+        return recipientPublicKey == other.recipientPublicKey &&
+               amount == other.amount;
+    }
+
+    // nlohmann/json serialization
+    friend void to_json(json& j, const TransactionOutput& p) {
+        j = json{{"recipientPublicKey", p.recipientPublicKey}, {"amount", p.amount}};
+    }
+
+    // nlohmann/json deserialization
+    friend void from_json(const json& j, TransactionOutput& p) {
+        j.at("recipientPublicKey").get_to(p.recipientPublicKey);
+        j.at("amount").get_to(p.amount);
+    }
+};
+
+/**
+ * @brief Enum for different types of transactions.
+ */
+enum class TransactionType {
+    VALUE_TRANSFER,             // Standard value transfer transaction
+    SMART_CONTRACT_CALL, // Transaction to call a smart contract function
+    AI_COMPUTATION_PROOF // Transaction to submit AI computation proof
+};
+
+/**
+ * @brief Represents a single transaction in the blockchain.
  */
 class Transaction {
 private:
-    std::string txId;               // Unique hash of this transaction
-    TransactionType type;           // Transaction type (NEW)
-    std::int64_t timestamp;         // Transaction timestamp (milliseconds since epoch)
-    std::string creatorPublicKey;   // Public key of transaction creator (NEW)
-    std::string payload;            // Transaction-specific data in JSON format (NEW)
+    std::string id;                         // Unique hash of this transaction
+    TransactionType type;                   // Type of transaction
+    long long timestamp;                    // Unix timestamp of transaction creation
+    std::string creatorPublicKey;           // Public key of transaction creator
+    std::string payload;                    // Transaction-specific data in JSON format
     std::vector<std::string> parentTxs;    // References to parent transactions in DAG structure
-    std::string signature;          // Signature of transaction creator (NEW)
+    std::string signature;                  // Signature of transaction creator
+    AIEngine::ProofOfComputation aiProof;   // AI computation proof, if type is AI_COMPUTATION_PROOF
 
-    // Internal function to calculate transaction ID (hash)
-    void calculateId(); // Renamed from createId
+    // Helper to calculate the transaction's ID (hash)
+    std::string calculateId();
 
 public:
     // Constructor for building a new transaction with flexible payload
     Transaction(TransactionType txType,
-        const std::string& creatorPubKey,
-        const std::string& dataPayload,
-        const std::vector<std::string>& parents = {});
+                const std::string& creatorPubKey,
+                const std::string& dataPayload = "",
+                const std::vector<std::string>& parents = {},
+                const AIEngine::ProofOfComputation& proof = {});
 
     // Constructor for deserializing or recreating an already signed transaction
-    Transaction(TransactionType txType,
-        const std::string& creatorPubKey,
-        const std::string& dataPayload,
-        const std::vector<std::string>& parents,
-        std::int64_t ts,
-        const std::string& id,
-        const std::string& sig);
+    Transaction(std::string id,
+                TransactionType txType,
+                long long ts,
+                std::string creatorPubKey,
+                std::string dataPayload,
+                std::vector<std::string> parents,
+                std::string sig,
+                AIEngine::ProofOfComputation proof);
 
-    // Legacy constructor for backward compatibility (financial transactions)
-    Transaction(std::vector<TransactionInput> ins,
-        std::vector<TransactionOutput> outs,
-        std::vector<std::string> parents = {});
-
-    // Legacy constructor for deserializing financial transactions
-    Transaction(std::vector<TransactionInput> ins,
-        std::vector<TransactionOutput> outs,
-        std::vector<std::string> parents,
-        std::int64_t ts,
-        std::string id);
-
-    /**
-     * @brief Signs the transaction with the provided private key
-     * @param privateKey The private key to sign the transaction
-     */
+    // Sign the transaction with private key
     void sign(const CryptoHelper::ECKeyPtr& privateKey);
 
-    /**
-     * @brief Verifies the transaction signature
-     * @return True if signature is valid, false otherwise
-     */
+    // Verify the transaction signature
     bool verifySignature() const;
 
-    /**
-     * @brief Validates transaction integrity based on its type
-     * For VALUE_TRANSFER: performs UTXO validation (double spending, signatures, etc.)
-     * For other types: performs basic structural validation
-     * @param utxoSet The current global UTXO set for validation (only used for VALUE_TRANSFER)
-     * @return True if the transaction is valid, false otherwise
-     * @throws TransactionError if validation fails due to integrity issues
-     */
+    // Validate the transaction (signatures, amounts, etc.)
     bool validate(const std::unordered_map<std::string, TransactionOutput>& utxoSet) const;
 
-    // Getters
-    const std::string& getId() const { return txId; }
+    // --- Getters ---
+    const std::string& getId() const { return id; }
     TransactionType getType() const { return type; }
+    long long getTimestamp() const { return timestamp; }
     const std::string& getCreatorPublicKey() const { return creatorPublicKey; }
     const std::string& getPayload() const { return payload; }
     const std::vector<std::string>& getParents() const { return parentTxs; }
     const std::string& getSignature() const { return signature; }
-    std::int64_t getTimestamp() const { return timestamp; }
+    const AIEngine::ProofOfComputation& getAIProof() const { return aiProof; }
 
-    // Legacy getters for financial transactions (inputs and outputs stored in payload)
-    std::vector<TransactionInput> getFinancialInputs() const;
-    std::vector<TransactionOutput> getFinancialOutputs() const;
+    // For value transfer transactions
+    const std::vector<TransactionInput>& getInputs() const;
+    const std::vector<TransactionOutput>& getOutputs() const;
 
-    /**
-     * @brief Helper method to create a signed TransactionInput for financial transactions
-     * This method is typically called by the client (wallet) or the node
-     * before adding the transaction to the DAG/blockchain.
-     * The signature covers the UTXO ID and the ID of the new transaction being created.
-     * @param utxoId The ID of the UTXO being spent.
-     * @param privateKey The private key of the UTXO owner.
-     * @param currentTxId The ID of the transaction that this input belongs to.
-     * @return A fully formed and signed TransactionInput.
-     */
-    TransactionInput createSignedInput(
+    // --- Setters ---
+    void setPayload(const std::string& newPayload);
+
+    // Get a hash of the transaction's content for signing inputs
+    std::string getHashForSigningInputs() const;
+
+    // Helper method to create a signed TransactionInput for financial transactions
+    static TransactionInput createSignedInput(
         const std::string& utxoId,
         const CryptoHelper::ECKeyPtr& privateKey,
         const std::string& currentTxId
     );
 
-    /**
-     * @brief Serializes the transaction data to a JSON string
-     * @return A JSON string representation of the transaction
-     */
+    // Serializes the transaction data to a JSON string
     std::string serialize() const;
 
-    /**
-     * @brief Deserializes a JSON string into a Transaction object
-     * @param jsonString The JSON string representing a transaction
-     * @return A shared_ptr to the deserialized Transaction object
-     */
+    // Deserializes a JSON string into a Transaction object
     static std::shared_ptr<Transaction> deserialize(const std::string& jsonString);
 
-    /**
-     * @brief Provides a human-readable string representation of the transaction
-     * @return A string with transaction details
-     */
+    // Provides a human-readable string representation of the transaction
     std::string toString() const;
 
-    /**
-     * @brief Converts TransactionType enum to string representation
-     * @param type The transaction type to convert
-     * @return String representation of the transaction type
-     */
+    // Converts TransactionType enum to string representation
     static std::string transactionTypeToString(TransactionType type);
 
-    /**
-     * @brief Converts string to TransactionType enum
-     * @param typeStr The string to convert
-     * @return Corresponding TransactionType enum value
-     */
+    // Converts string to TransactionType enum
     static TransactionType stringToTransactionType(const std::string& typeStr);
 };
 
 #endif // TRANSACTION_H
+

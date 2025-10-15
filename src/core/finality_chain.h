@@ -7,21 +7,16 @@
 #include <unordered_map> // For UTXO set and block storage
 #include <stdexcept>     // For std::runtime_error
 #include <chrono>        // For timestamping blocks
+#include <mutex>         // For std::mutex
 
+#include "block.h"          // Include the Block class definition
+#include "validator_manager.h" // For ValidatorManager
 #include "transaction.h"    // Needed for Transaction and UTXO definitions
 #include "crypto_helper.h"  // Needed for hashing utilities
 
 // ---------------------------
 // 0. Error Handling
 // ---------------------------
-/**
- * Custom exception class for Block-specific errors.
- */
-class BlockError : public std::runtime_error {
-public:
-    explicit BlockError(const std::string& msg) : std::runtime_error(msg) {}
-};
-
 /**
  * Custom exception class for FinalityChain-specific errors.
  */
@@ -33,62 +28,6 @@ public:
 // ---------------------------
 // 4. Blockchain Component
 // ---------------------------
-
-/**
- * Represents a Block in the Finality Chain.
- * Each block contains a header and a list of confirmed transactions.
- * It also references the previous block in the chain.
- */
-class Block {
-private:
-    std::string hash;               // The unique hash of this block
-    std::string previousBlockHash;  // Hash of the previous block in the chain
-    std::int64_t timestamp;         // Time when the block was created
-    std::string validatorId;        // Public key of the validator who created this block
-    std::string validatorSignature; // Signature of the validator on the block hash
-    std::vector<std::string> transactionIds; // IDs of transactions confirmed in this block
-    double totalFees;               // Sum of transaction fees in this block (reward for validator)
-
-    // Private method to calculate the block's hash
-    void calculateHash();
-
-public:
-    // Constructor for creating a new block (e.g., by a validator)
-    Block(std::string prevHash,
-          const std::string& valId,
-          const CryptoHelper::ECKeyPtr& validatorPrivateKey,
-          const std::vector<std::shared_ptr<Transaction>>& confirmedTransactions);
-
-    // Constructor for loading an existing block (e.g., from storage or network)
-    Block(std::string hash,
-          std::string prevHash,
-          std::int64_t ts,
-          std::string valId,
-          std::string valSignature,
-          std::vector<std::string> txIds,
-          double fees);
-
-    /**
-     * Validates the integrity of the block (e.g., hash, validator signature).
-     * @param validatorPublicKeyHex The public key of the validator.
-     * @return True if the block is valid, false otherwise.
-     * @throws BlockError if validation fails.
-     */
-    bool validate(const std::string& validatorPublicKeyHex) const;
-
-    // Getters for block data
-    const std::string& getHash() const { return hash; }
-    const std::string& getPreviousBlockHash() const { return previousBlockHash; }
-    std::int64_t getTimestamp() const { return timestamp; }
-    const std::string& getValidatorId() const { return validatorId; }
-    const std::string& getValidatorSignature() const { return validatorSignature; }
-    const std::vector<std::string>& getTransactionIds() const { return transactionIds; }
-    double getTotalFees() const { return totalFees; }
-
-    // Serialization for networking/storage (optional, can be done externally as well)
-    std::string serialize() const;
-    static std::shared_ptr<Block> deserialize(const std::string& data);
-};
 
 /**
  * Manages the main Finality Blockchain.
@@ -115,6 +54,11 @@ private:
     // The current height of the blockchain
     int currentHeight;
 
+    // Mutex for protecting shared data in a multi-threaded environment
+    mutable std::mutex chainMutex;
+
+    std::shared_ptr<ValidatorManager> validatorManager; // Reference to the ValidatorManager
+
     /**
      * Applies the effects of a block's transactions to the UTXO set.
      * Removes spent UTXOs and adds new ones.
@@ -125,11 +69,12 @@ private:
      */
     void updateUtxoSet(const Block& block, 
                        const std::unordered_map<std::string, std::shared_ptr<Transaction>>& transactionsInBlock,
-                       bool isRevert = false);
+                       bool isRevert,
+                       std::unordered_map<std::string, TransactionOutput>& targetUtxoSet);
 
 public:
     // Constructor
-    FinalityChain();
+    FinalityChain(std::shared_ptr<ValidatorManager> vm);
 
     /**
      * Initializes the blockchain with a genesis block if it's empty.
@@ -186,9 +131,23 @@ public:
      */
     bool containsBlock(const std::string& blockHash) const;
 
+    /**
+     * @brief Checks if a transaction exists in any block in the chain.
+     * @param txId The ID of the transaction to check.
+     * @return True if the transaction exists in a block, false otherwise.
+     */
+    bool containsTransaction(const std::string& txId) const;
+
+    /**
+     * @brief Returns a shared_ptr to the ValidatorManager.
+     * @return The ValidatorManager instance.
+     */
+    std::shared_ptr<ValidatorManager> getValidatorManager() const { return validatorManager; }
+
     // Utility/Debugging methods
     void printChainStatus() const;
     void clear(); // Clears the entire chain (for testing/reset)
 };
 
 #endif // FINALITY_CHAIN_H
+

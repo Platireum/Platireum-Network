@@ -9,6 +9,7 @@
 #include <algorithm>     // Used for sorting and searching algorithms
 #include <stdexcept>     // Used for std::runtime_error
 #include <mutex>         // For std::mutex to protect shared data
+#include "finality_chain.h" // Include the FinalityChain class definition
 
 #include "transaction.h" // We need the definition of the Transaction class
 
@@ -33,6 +34,9 @@ public:
  * before they are confirmed and included in the main blockchain.
  */
 class TransactionDAG {
+private:
+    // Reference to the FinalityChain to check for confirmed transactions
+    const FinalityChain& finalityChain;
 private:
     // Store all transactions in the DAG by their ID (transaction hash)
     std::unordered_map<std::string, std::shared_ptr<Transaction>> transactions;
@@ -68,9 +72,12 @@ private:
      */
     bool validateParentExistence(const std::vector<std::string>& parentTxIds) const;
 
+    // Helper to check if a transaction is already confirmed in the FinalityChain
+    bool isTransactionConfirmed(const std::string& txId) const;
+
 public:
     // Constructor
-    TransactionDAG();
+    TransactionDAG(const FinalityChain& chain);
 
     /**
      * @brief Adds a new transaction to the DAG.
@@ -80,8 +87,7 @@ public:
      * @throws DAGError if the transaction is invalid or already exists, or if parents are invalid.
      * @throws TransactionError if the transaction fails its internal validation.
      */
-    void addTransaction(std::shared_ptr<Transaction> tx,
-        const std::unordered_map<std::string, TransactionOutput>& currentUtxoSet);
+    void addTransaction(std::shared_ptr<Transaction> tx);
 
     /**
      * @brief Retrieves a transaction from the DAG by its ID.
@@ -142,6 +148,13 @@ public:
     std::vector<std::shared_ptr<Transaction>> getTransactionsToProcess(
         size_t maxTransactions,
         const std::unordered_map<std::string, double>& reputationScores) const;
+
+    /**
+     * @brief Calculates the Merkle root of a given list of transactions.
+     * @param transactions The list of transactions.
+     * @return The Merkle root as a hexadecimal string.
+     */
+    static std::string calculateMerkleRoot(const std::vector<std::shared_ptr<Transaction>>& transactions);
 
     // Debugging/Utility methods (useful during development)
     void printDAGStatus() const;
