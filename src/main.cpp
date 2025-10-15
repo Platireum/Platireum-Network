@@ -9,34 +9,22 @@
 #include "core/key_generator.h" // To generate keys for nodes/users
 #include "api/api_server.h"
 #include "api/cli_client.h"
-
-// Helper function to generate a unique ID (simplified for demonstration)
-std::string generateUniqueId(const std::string& prefix) {
-    auto now = std::chrono::high_resolution_clock::now();
-    auto nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<> distrib(0, 999999);
-    return prefix + "_" + std::to_string(nanoseconds) + "_" + std::to_string(distrib(gen));
-}
+#include "utils/id_generator.h" // For generateUniqueId
 
 int main() {
     std::cout << "Starting Blockchain Node Application..." << std::endl;
 
     // --- 1. Generate Keys for the Node ---
-    KeyGenerator keyGen;
-CryptoHelper::ECKeyPtr nodePrivateKeyEC = cryptoHelper.generateKeyPair();
-std::string nodePubKey = cryptoHelper.getPublicKeyHex(nodePrivateKeyEC);
-// Do NOT store or print the raw private key string from OpenSSL
-// std::string nodePrivKey = "managed_by_ECKeyPtr"; // For conceptual clarity
+    CryptoHelper::ECKeyPtr nodePrivateKeyEC = CryptoHelper::generateKeyPair();
+    std::string nodePubKey = CryptoHelper::getPublicKeyHex(nodePrivateKeyEC);
+    std::string nodeId = generateUniqueId("node"); // Generate a unique ID for the node
 
     std::cout << "\nNode Identity Generated:" << std::endl;
     std::cout << "  ID: " << nodeId.substr(0, 16) << "..." << std::endl;
     std::cout << "  Public Key: " << nodePubKey.substr(0, 20) << "..." << std::endl;
-    // std::cout << "  Private Key: " << nodePrivKey.substr(0, 20) << "..." << std::endl; // Keep private key secure in real apps!
 
     // --- 2. Create and Initialize the Blockchain Node ---
-    std::shared_ptr<Node> blockchainNode = std::make_shared<Node>(nodeId, nodePubKey, nodePrivKey);
+    std::shared_ptr<Node> blockchainNode = std::make_shared<Node>(nodeId, nodePubKey, nodePrivateKeyEC);
     try {
         blockchainNode->initialize();
         blockchainNode->start();
@@ -74,3 +62,4 @@ std::string nodePubKey = cryptoHelper.getPublicKeyHex(nodePrivateKeyEC);
 
     return 0;
 }
+
