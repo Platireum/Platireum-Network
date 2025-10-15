@@ -6,31 +6,12 @@
 #include "../../src/core/transaction.h" // For Transaction serialization/deserialization
 #include "../../src/core/finality_chain.h" // For Block serialization/deserialization
 #include "../../src/smart_contracts/contract.h" // For SmartContract serialization/deserialization
+#include "../../src/utils/json_utils.h" // For JSON utility functions
 
-// --- Helper for simple JSON creation (for API responses) ---
-// In a real-world scenario, use a robust JSON library like nlohmann/json.
-std::string createSimpleJson(const std::unordered_map<std::string, std::string>& data) {
-    std::stringstream ss;
-    ss << "{";
-    bool first = true;
-    for (const auto& pair : data) {
-        if (!first) {
-            ss << ",";
-        }
-        // Basic escaping for values. Keys are assumed to be safe.
-        std::string escaped_value = pair.second;
-        // Replace " with \"
-        size_t pos = escaped_value.find("\"");
-        while(pos != std::string::npos) {
-            escaped_value.replace(pos, 1, "\\\"");
-            pos = escaped_value.find("\"", pos + 2);
-        }
-        ss << "\"" << pair.first << "\":\"" << escaped_value << "\"";
-        first = false;
-    }
-    ss << "}";
-    return ss.str();
-}
+// --- Helper for simple JSON parsing (for contract parameters) ---
+// This is a very rudimentary JSON parser. In a real-world scenario,
+// use a robust JSON library like nlohmann/json.
+
 
 // Helper to extract a parameter from a map, with a default value or throwing
 std::string getParam(const std::unordered_map<std::string, std::string>& params, const std::string& key, bool required = false) {
@@ -146,7 +127,7 @@ ApiResponse ApiServer::handlePostDeployContract(const ApiRequest& req) {
     try {
         // The body should contain the serialized SmartContract object
         std::shared_ptr<SmartContract> contract = SmartContract::deserialize(req.body);
-        nodeInstance->deployContract(contract); // Node will handle the actual deployment via VM
+        nodeInstance->deployContract(contract, contract->getBytecode()); // Node will handle the actual deployment via VM
         
         std::unordered_map<std::string, std::string> response_data;
         response_data["status"] = "Contract deployment initiated.";

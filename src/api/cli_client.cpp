@@ -1,33 +1,16 @@
 #include "cli_client.h"
 #include <sstream> // For std::stringstream
+#include <ctime> // For std::time
+#include <chrono> // For std::chrono
+#include "../../src/smart_contracts/contract.h" // For SmartContract class
+#include "../../src/utils/json_utils.h" // For JSON utility functions
 #include <algorithm> // For std::remove
 #include <limits>    // For std::numeric_limits
 
 // --- Helper for creating simple JSON strings (for request bodies) ---
 // This is a very rudimentary JSON builder. In a real-world scenario,
 // use a robust JSON library like nlohmann/json.
-std::string createSimpleJson(const std::unordered_map<std::string, std::string>& data) {
-    std::stringstream ss;
-    ss << "{";
-    bool first = true;
-    for (const auto& pair : data) {
-        if (!first) {
-            ss << ",";
-        }
-        // Basic escaping for values. Keys are assumed to be safe.
-        std::string escaped_value = pair.second;
-        // Replace " with \"
-        size_t pos = escaped_value.find("\"");
-        while(pos != std::string::npos) {
-            escaped_value.replace(pos, 1, "\\\"");
-            pos = escaped_value.find("\"", pos + 2);
-        }
-        ss << "\"" << pair.first << "\":\"" << escaped_value << "\"";
-        first = false;
-    }
-    ss << "}";
-    return ss.str();
-}
+
 
 // Constructor
 CliClient::CliClient(std::shared_ptr<ApiServer> apiSrv, const std::string& senderId)
@@ -157,16 +140,16 @@ void CliClient::handleDeployContractCommand(const std::vector<std::string>& args
     // We need to build a full contract JSON then deserialize it,
     // or improve SmartContract::deserialize to take individual fields.
     // Let's create a temporary SmartContract and serialize it.
-    std::shared_ptr<SmartContract> tempContract = std::make_shared<SmartContract>(contractId, contractCode, ownerPublicKey);
+    SmartContract tempContract(contractId, std::vector<uint8_t>(contractCode.begin(), contractCode.end()), ownerPublicKey);
     
     // If initialStateJson is provided, attempt to parse and set it.
     // This requires a simple JSON parser for the initial state.
     auto initial_state_map = parseSimpleJson(initialStateJson);
     for (const auto& pair : initial_state_map) {
-        tempContract->setState(pair.first, pair.second);
+        tempContract.setState(pair.first, pair.second);
     }
     
-    std::string serializedContract = tempContract->serialize();
+    std::string serializedContract = tempContract.serialize();
 
     ApiRequest request("/contract/deploy", "POST", serializedContract);
     ApiResponse response = apiServer->processRequest(request);
