@@ -15,7 +15,7 @@
 
 </div>
 
-Hybrid blockchain-DAG system combining blockchain security with DAG scalability. It uses Proof-of-Stake for periodic block creation to finalize DAG transactions, allowing parallel processing. The system employs a UTXO model and supports smart contracts via cryptographic validation.
+Platireum Network is a cutting-edge hybrid blockchain-DAG system that integrates a novel **Proof of Computing (PoC)** consensus mechanism. This mechanism combines the security of a blockchain with the scalability of a Directed Acyclic Graph (DAG), enabling parallel transaction processing and efficient finality. It leverages **AI computation** for verifiable useful work and employs **value-based selection** for validators, ensuring a robust and fair network. The system utilizes a UTXO model and supports smart contracts through cryptographic validation.
 
 ## Overview
 
@@ -23,7 +23,9 @@ Platireum Network is a blockchain platform that provides a robust infrastructure
 
 ## ✨ Features
 
-- **Core Blockchain Implementation**: Secure and efficient blockchain core with consensus mechanism
+- **Proof of Computing (PoC) Consensus**: A hybrid consensus mechanism integrating AI computation, value-based validator selection, and a dual TransactionDAG/FinalityChain architecture for enhanced security and scalability.
+- **AI Computation Integration**: Verifiable AI computation as a core component of the consensus, rewarding useful work.
+- **Value-Based Validator Selection**: A dynamic selection process for validators based on their staked capital and proven useful AI computation scores.
 - **Smart Contracts**: Support for executing and managing smart contracts
 - **API Integration**: RESTful API for easy integration with external services
 - **Advanced Networking**: P2P networking capabilities for node communication
@@ -34,6 +36,7 @@ Platireum Network is a blockchain platform that provides a robust infrastructure
 ```
 platireum-network/
 ├── src/
+│   ├── ai_engine/     # AI computation engine and proof generation
 │   ├── api/           # API implementation
 │   ├── core/          # Core blockchain functionality
 │   ├── networking/    # P2P networking components
